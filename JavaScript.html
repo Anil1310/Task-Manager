@@ -923,13 +923,13 @@ function renderDashboard(){
              statCard('fa-check-circle', 'Completed', completed) +
              statCard('fa-triangle-exclamation', 'Overdue', overdue) +
            '</div>' +
-           '<div class="relative overflow-hidden rounded-[32px] border border-amber-500/20 bg-gradient-to-br from-base-900/90 to-base-950/90 p-8 shadow-2xl backdrop-blur-xl mb-8 group">' +
-             '<div class="absolute -top-24 -right-24 w-64 h-64 bg-amber-500/20 rounded-full blur-[80px] pointer-events-none group-hover:bg-amber-500/30 transition-all duration-700"></div>' +
+           '<div class="relative overflow-hidden rounded-[32px] border border-amber-500/20 bg-base-900/90 p-8 shadow-2xl backdrop-blur-xl mb-8 group">' +
+             '<div class="absolute -top-24 -right-24 w-64 h-64 bg-amber-500/10 rounded-full blur-[80px] pointer-events-none group-hover:bg-amber-500/20 transition-all duration-700"></div>' +
              '<div class="absolute -bottom-24 -left-24 w-64 h-64 bg-orange-500/10 rounded-full blur-[80px] pointer-events-none"></div>' +
              '<div class="relative z-10">' +
-               '<p class="text-[11px] uppercase tracking-[0.32em] text-amber-400/80 mb-2 font-semibold">Workspace Overview</p>' +
-               '<h2 class="text-3xl lg:text-5xl font-display font-800 tracking-tight hero-heading text-transparent bg-clip-text mb-4">Hello, ' + userName + '</h2>' +
-               '<p class="max-w-2xl text-sm lg:text-base text-base-400 leading-relaxed">Here is what\'s happening with your projects today. You have <strong class="text-white">' + (pending + inProgress) + ' active tasks</strong> and <strong class="text-white">' + overdue + ' overdue items</strong> that need attention.</p>' +
+               '<p class="text-[11px] uppercase tracking-[0.32em] text-amber-500 mb-2 font-bold">Workspace Overview</p>' +
+               '<h2 class="text-3xl lg:text-5xl font-display font-800 tracking-tight text-base-50 dark:text-white mb-4">Hello, ' + userName + '</h2>' +
+               '<p class="max-w-2xl text-sm lg:text-base text-base-500 dark:text-base-400 leading-relaxed">Here is what\'s happening with your projects today. You have <strong class="text-base-50 dark:text-white font-bold">' + (pending + inProgress) + ' active tasks</strong> and <strong class="text-base-50 dark:text-white font-bold">' + overdue + ' overdue items</strong> that need attention.</p>' +
              '</div>' +
            '</div>' +
            '<div class="grid gap-6 lg:grid-cols-3">' +
@@ -937,7 +937,7 @@ function renderDashboard(){
                '<div class="rounded-[28px] border border-base-800 bg-base-900/40 p-6 shadow-xl backdrop-blur-md">' +
                  '<div class="flex items-center justify-between gap-4 mb-6">' +
                    '<div>' +
-                     '<h3 class="text-xl font-display font-bold text-white flex items-center gap-2"><i class="fas fa-bolt text-amber-500 text-lg"></i> Today’s Focus</h3>' +
+                     '<h3 class="text-xl font-display font-bold text-base-50 dark:text-white flex items-center gap-2"><i class="fas fa-bolt text-amber-500 text-lg"></i> Today’s Focus</h3>' +
                      '<p class="text-xs text-base-500 mt-1">Your most recently updated tasks.</p>' +
                    '</div>' +
                     '<span class="rounded-full px-3 py-1 text-[11px] font-medium text-base-400 border border-base-700">' + recent.length + ' items</span>' +
@@ -972,19 +972,19 @@ function renderDashboard(){
                '</div>' : '') +
              '</div>' +
              '<div class="space-y-6">' +
-               '<div class="rounded-[28px] border border-red-900/30 bg-gradient-to-b from-red-950/20 to-base-900/40 p-6 shadow-xl backdrop-blur-md">' +
+               '<div class="rounded-[28px] border border-red-500/20 bg-red-500/5 dark:bg-gradient-to-b dark:from-red-950/20 dark:to-base-900/40 p-6 shadow-xl backdrop-blur-md">' +
                  '<div class="flex items-center justify-between gap-4 mb-6">' +
                    '<div>' +
-                     '<h3 class="text-xl font-display font-bold text-red-100 flex items-center gap-2"><i class="fas fa-exclamation-circle text-red-500 text-lg animate-pulse"></i> Urgent</h3>' +
+                     '<h3 class="text-xl font-display font-bold text-red-500 dark:text-red-400 flex items-center gap-2"><i class="fas fa-exclamation-circle text-red-500 text-lg animate-pulse"></i> Urgent</h3>' +
                    '</div>' +
                  '</div>' +
                  '<div class="space-y-3">' +
                    (vis.filter(function(t){return t.priority==='High'&&t.status!=='Completed';}).slice(0,4).map(function(t){
-                     return '<div class="rounded-2xl border border-red-900/40 bg-red-950/20 p-4 cursor-pointer hover:bg-red-900/40 transition-all hover:-translate-y-0.5 group" onclick="openDetail('+t.id+')">' +
-                       '<p class="text-sm font-medium text-red-100 truncate group-hover:text-white transition-colors">' + t.title + '</p>' +
+                     return '<div class="rounded-2xl border border-red-500/20 bg-red-500/10 dark:bg-red-950/20 p-4 cursor-pointer hover:bg-red-500/20 dark:hover:bg-red-900/40 transition-all hover:-translate-y-0.5 group" onclick="openDetail('+t.id+')">' +
+                       '<p class="text-sm font-semibold text-base-50 dark:text-red-100 truncate group-hover:text-red-500 transition-colors">' + t.title + '</p>' +
                        '<div class="flex items-center gap-2 mt-2">' +
                           userAvatarHtml(t.assignee, 'w-5 h-5', 'text-[8px]', '') +
-                         '<p class="text-[11px] text-red-400/80">' + formatDate(t.deadline) + '</p>' +
+                         '<p class="text-[11px] text-red-500 dark:text-red-400/80 font-medium">' + formatDate(t.deadline) + '</p>' +
                        '</div>' +
                      '</div>';
                    }).join('') || '<div class="p-6 text-center rounded-2xl border border-base-800 border-dashed bg-base-900/50"><i class="fas fa-check-circle text-emerald-500 text-2xl mb-2 opacity-50"></i><p class="text-sm text-base-500 italic">No urgent tasks</p></div>') +
@@ -998,7 +998,7 @@ function renderDashboard(){
                      '<defs><linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#fcd34d"/><stop offset="50%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#ea580c"/></linearGradient></defs>' +
                    '</svg>' +
                    '<div class="absolute inset-0 flex flex-col items-center justify-center">' +
-                     '<span class="text-3xl font-display font-bold text-white leading-none">' + completionRate + '%</span>' +
+                     '<span class="text-3xl font-display font-bold text-base-50 dark:text-white leading-none">' + completionRate + '%</span>' +
                      '<span class="text-[10px] text-base-400 uppercase tracking-widest mt-1">Done</span>' +
                    '</div>' +
                  '</div>' +
@@ -1018,7 +1018,7 @@ function statCard(icon,label,val){
              '</div>' +
              '<div class="min-w-0">' +
                '<p class="text-[10px] uppercase tracking-[0.2em] text-base-500 font-semibold mb-1">' + label + '</p>' +
-               '<p class="text-3xl font-display font-bold text-white leading-none">' + val + '</p>' +
+               '<p class="text-3xl font-display font-bold text-base-50 dark:text-white leading-none">' + val + '</p>' +
              '</div>' +
            '</div>' +
          '</div>';

@@ -98,6 +98,20 @@
   .text-base-950, button.text-base-950, i.text-base-950 {
     color: #020617 !important;
   }
+
+  /* Light theme high-contrast visibility overrides */
+  html[data-theme='light'] .text-white {
+    color: var(--base-50) !important;
+  }
+  html[data-theme='light'] .text-red-100 {
+    color: #991b1b !important;
+  }
+  html[data-theme='light'] .hero-heading {
+    color: var(--base-50) !important;
+    background: linear-gradient(135deg, #0f172a 0%, #d97706 100%) !important;
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+  }
   * { box-sizing: border-box; }
   body {
     font-family: 'Plus Jakarta Sans', sans-serif;
