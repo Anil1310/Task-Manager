@@ -164,8 +164,15 @@ tailwind.config={theme:{extend:{colors:{base:{50:'var(--base-50)',100:'var(--bas
   </div>
 </div>
 
-<!-- DETAIL MODAL -->
-<div id="detailModal" class="fixed inset-0 z-50 hidden items-center justify-center modal-backdrop"><div class="bg-base-900 border border-base-700 rounded-xl w-full max-w-3xl mx-4 slide-in max-h-[90vh] overflow-y-auto"><div id="detailContent" class="p-6"></div></div></div>
+<!-- DETAIL SLIDE-OVER DRAWER -->
+<div id="detailModal" class="fixed inset-0 z-50 hidden overflow-hidden">
+  <div id="detailBackdrop" class="fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 opacity-0" onclick="closeDetail()"></div>
+  <div class="fixed inset-y-0 right-0 max-w-full flex pl-6 sm:pl-10 pointer-events-none">
+    <div id="detailDrawerPanel" class="w-screen max-w-2xl bg-base-900 border-l border-base-800 shadow-[0_0_60px_rgba(0,0,0,0.85)] flex flex-col pointer-events-auto transform transition-transform duration-300 ease-out translate-x-full">
+      <div id="detailContent" class="h-full flex flex-col overflow-y-auto p-6 scrollbar-thin"></div>
+    </div>
+  </div>
+</div>
 <div id="notifPanel" class="fixed top-14 right-6 z-50 hidden w-80 bg-base-900 border border-base-700 rounded-xl shadow-2xl slide-in"><div class="p-4 border-b border-base-800 flex justify-between"><h4 class="font-display font-600">Notifications</h4><button onclick="clearNotifications()" class="text-xs text-amber-500">Clear all</button></div><div id="notifList" class="max-h-72 overflow-y-auto"></div></div>
 
 <div id="confirmDialog" class="fixed inset-0 z-60 hidden items-center justify-center bg-black/60 px-4 py-8">

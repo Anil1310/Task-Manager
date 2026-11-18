@@ -1123,6 +1123,40 @@ function renderTasksView(){
     var canDelete = isMD();
     var canAssign = isMD() || isManager();
 
+    // Inline Quick-Edit for Priority in Table View
+    var priorityCellHtml = '';
+    if (canEdit && !isTaskCompleted(t)) {
+      priorityCellHtml = '<div class="relative inline-block group" onclick="event.stopPropagation()">' +
+        '<span class="cursor-pointer hover:ring-2 hover:ring-amber-500/40 rounded transition-all">' + priorityPill + '</span>' +
+        '<select onchange="quickUpdatePriority(' + t.id + ', this.value)" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer select-clean" title="Click to quick-change priority">' +
+          '<option value="High"' + (t.priority === 'High' ? ' selected' : '') + '>High</option>' +
+          '<option value="Medium"' + (t.priority === 'Medium' ? ' selected' : '') + '>Medium</option>' +
+          '<option value="Low"' + (t.priority === 'Low' ? ' selected' : '') + '>Low</option>' +
+        '</select>' +
+      '</div>';
+    } else {
+      priorityCellHtml = priorityPill;
+    }
+
+    // Inline Quick-Edit for Status in Table View
+    var statusCellHtml = '';
+    var statusBadge = '<span class="text-[10px] font-bold propercase tracking-wider px-2.5 py-1 rounded-full ' + getStatusClass(t.status) + ' inline-flex items-center gap-1.5 cursor-pointer hover:ring-2 hover:ring-amber-500/30 transition-all">' + 
+      t.status + (canEdit ? ' <i class="fas fa-chevron-down text-[8px] opacity-60 group-hover:opacity-100 transition-opacity"></i>' : '') + 
+    '</span>';
+    if (canEdit) {
+      statusCellHtml = '<div class="relative inline-block group" onclick="event.stopPropagation()">' +
+        statusBadge +
+        '<select onchange="quickUpdateStatus(' + t.id + ', this.value)" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer select-clean" title="Click to quick-change status">' +
+          '<option value="Pending"' + (t.status === 'Pending' ? ' selected' : '') + '>Pending</option>' +
+          '<option value="In Progress"' + (t.status === 'In Progress' ? ' selected' : '') + '>In Progress</option>' +
+          '<option value="Under Review"' + (t.status === 'Under Review' ? ' selected' : '') + '>Under Review</option>' +
+          '<option value="Completed"' + (t.status === 'Completed' ? ' selected' : '') + '>Completed</option>' +
+        '</select>' +
+      '</div>';
+    } else {
+      statusCellHtml = statusBadge;
+    }
+
     var actionButtonsHtml = '<div class="flex items-center justify-center gap-1.5 flex-wrap">';
     
     // 1. View button
@@ -1185,10 +1219,8 @@ function renderTasksView(){
         '</div>' +
       '</td>' +
       '<td class="px-3 py-3 whitespace-nowrap">' + assignedByHtml + '</td>' +
-      '<td class="px-3 py-3 whitespace-nowrap">' + priorityPill + '</td>' +
-      '<td class="px-3 py-3 whitespace-nowrap">' +
-        '<span class="text-[10px] font-bold propercase tracking-wider px-2.5 py-1 rounded-full ' + getStatusClass(t.status) + '">' + t.status + '</span>' +
-      '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' + priorityCellHtml + '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' + statusCellHtml + '</td>' +
       '<td class="px-3 py-3 whitespace-nowrap">' + progressHtml + '</td>' +
       '<td class="px-3 py-3 whitespace-nowrap">' +
         '<div class="flex flex-col gap-1">' +
@@ -1925,15 +1957,49 @@ function openDetail(taskId){
            '</div>';
   }).join('') || '<p class="text-xs italic text-base-500 text-center py-8">No communication comments posted yet.</p>';
 
+  var statusBadgeDropdown = canEdit ?
+    '<div class="relative inline-block group">' +
+      '<span class="px-2.5 py-1 text-[10px] font-bold rounded-full ' + getStatusClass(t.status) + ' inline-flex items-center gap-1.5 cursor-pointer hover:ring-2 hover:ring-amber-500/30 transition-all">' +
+        t.status + ' <i class="fas fa-chevron-down text-[8px] opacity-70"></i>' +
+      '</span>' +
+      '<select onchange="quickUpdateStatus(' + t.id + ', this.value)" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer select-clean" title="Quick change status">' +
+        '<option value="Pending"' + (t.status === 'Pending' ? ' selected' : '') + '>Pending</option>' +
+        '<option value="In Progress"' + (t.status === 'In Progress' ? ' selected' : '') + '>In Progress</option>' +
+        '<option value="Under Review"' + (t.status === 'Under Review' ? ' selected' : '') + '>Under Review</option>' +
+        '<option value="Completed"' + (t.status === 'Completed' ? ' selected' : '') + '>Completed</option>' +
+      '</select>' +
+    '</div>' :
+    '<span class="px-2.5 py-1 text-[10px] font-bold rounded-full ' + getStatusClass(t.status) + '">' + t.status + '</span>';
+
+  var priorityBadgeDropdown = (canEdit && !isTaskCompleted(t)) ?
+    '<div class="relative inline-block group">' +
+      '<span class="cursor-pointer hover:ring-2 hover:ring-amber-500/30 rounded transition-all">' + priorityPill + '</span>' +
+      '<select onchange="quickUpdatePriority(' + t.id + ', this.value)" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer select-clean" title="Quick change priority">' +
+        '<option value="High"' + (t.priority === 'High' ? ' selected' : '') + '>High</option>' +
+        '<option value="Medium"' + (t.priority === 'Medium' ? ' selected' : '') + '>Medium</option>' +
+        '<option value="Low"' + (t.priority === 'Low' ? ' selected' : '') + '>Low</option>' +
+      '</select>' +
+    '</div>' : priorityPill;
+
   content.innerHTML=
-    '<div class="flex justify-between items-start gap-4 mb-4 pb-3 border-b border-base-800">' +
-      '<div>' +
-        '<span class="text-[9px] font-bold text-amber-500 propercase tracking-widest block mb-0.5">Task Detail</span>' +
-        '<h3 class="font-display text-lg font-bold leading-snug propercase tracking-tight text-base-100 dark:text-white">'+t.title+'</h3>' +
+    '<div class="flex items-center justify-between gap-4 pb-4 mb-4 border-b border-base-800 shrink-0 sticky -top-6 -mx-6 px-6 py-4 bg-base-900/95 backdrop-blur-md z-20">' +
+      '<div class="flex items-center gap-2 flex-wrap min-w-0">' +
+        '<span class="px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono text-xs font-bold tracking-wide">#' + t.id + '</span>' +
+        '<span class="text-xs text-base-400 font-semibold truncate max-w-[140px] sm:max-w-xs">' + t.project + '</span>' +
+        '<div class="flex items-center gap-2 ml-1">' +
+          statusBadgeDropdown +
+          priorityBadgeDropdown +
+        '</div>' +
       '</div>' +
-      '<button onclick="closeDetail()" class="w-8 h-8 rounded-lg bg-base-850 hover:bg-base-800 flex items-center justify-center shrink-0 border border-base-800 transition-colors">' +
-        '<i class="fas fa-times text-xs text-base-400"></i>' +
-      '</button>' +
+      '<div class="flex items-center gap-2 shrink-0">' +
+        '<span class="hidden sm:inline-block text-[10px] text-base-500 font-mono border border-base-800 bg-base-850 px-1.5 py-0.5 rounded">ESC</span>' +
+        '<button onclick="closeDetail()" class="w-8 h-8 rounded-lg bg-base-850 hover:bg-base-800 flex items-center justify-center shrink-0 border border-base-800 hover:border-base-700 transition-colors" title="Close Drawer">' +
+          '<i class="fas fa-times text-xs text-base-400"></i>' +
+        '</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mb-5">' +
+      '<h3 class="font-display text-xl sm:text-2xl font-bold leading-snug tracking-tight text-white mb-1">' + t.title + '</h3>' +
     '</div>' +
     '<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">' +
       '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
@@ -2015,11 +2081,111 @@ function openDetail(taskId){
       '</div>'
     : '');
 
-  modal.classList.remove('hidden'); modal.classList.add('flex');
+  modal.classList.remove('hidden');
+  var backdrop = document.getElementById('detailBackdrop');
+  var drawer = document.getElementById('detailDrawerPanel');
+  requestAnimationFrame(function() {
+    if (backdrop) backdrop.classList.remove('opacity-0');
+    if (drawer) {
+      drawer.classList.remove('translate-x-full');
+      drawer.classList.add('translate-x-0');
+    }
+  });
 
   loadAttachments(t.id);
 }
-function closeDetail(){ document.getElementById('detailModal').classList.add('hidden'); document.getElementById('detailModal').classList.remove('flex'); }
+
+function closeDetail() {
+  var modal = document.getElementById('detailModal');
+  var backdrop = document.getElementById('detailBackdrop');
+  var drawer = document.getElementById('detailDrawerPanel');
+  if (backdrop) backdrop.classList.add('opacity-0');
+  if (drawer) {
+    drawer.classList.remove('translate-x-0');
+    drawer.classList.add('translate-x-full');
+  }
+  setTimeout(function() {
+    if (modal) modal.classList.add('hidden');
+  }, 280);
+}
+
+function quickUpdateStatus(taskId, newStatus) {
+  var t = findTaskById(taskId);
+  if (!t) return;
+  
+  var canEdit = isMD() || isSuperAdmin() || isManager() || (t.assignee === currentUser.username);
+  if (!canEdit) {
+    showToast('You do not have permission to change status of this task', 'error');
+    renderView();
+    return;
+  }
+  
+  var prevStatus = t.status;
+  var prevProgress = t.progress;
+  
+  t.status = newStatus;
+  if (newStatus === 'Completed') {
+    t.progress = 100;
+  } else if (prevStatus === 'Completed' && t.progress === 100) {
+    t.progress = 50;
+  }
+  
+  showToast('Updating status to ' + newStatus + '...', 'info');
+  renderView();
+  
+  var drawerModal = document.getElementById('detailModal');
+  if (drawerModal && !drawerModal.classList.contains('hidden')) {
+    openDetail(taskId);
+  }
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      showToast('Status updated to ' + newStatus, 'success');
+      updateNotifications();
+    })
+    .withFailureHandler(function(err) {
+      t.status = prevStatus;
+      t.progress = prevProgress;
+      renderView();
+      showToast('Failed to update status: ' + (err.message || err), 'error');
+    })
+    .saveTaskToSheet(t);
+}
+
+function quickUpdatePriority(taskId, newPriority) {
+  var t = findTaskById(taskId);
+  if (!t) return;
+  
+  var canEdit = isMD() || isSuperAdmin() || isManager() || (t.assignee === currentUser.username);
+  if (!canEdit) {
+    showToast('You do not have permission to change priority of this task', 'error');
+    renderView();
+    return;
+  }
+  
+  var prevPriority = t.priority;
+  t.priority = newPriority;
+  
+  showToast('Updating priority to ' + newPriority + '...', 'info');
+  renderView();
+  
+  var drawerModal = document.getElementById('detailModal');
+  if (drawerModal && !drawerModal.classList.contains('hidden')) {
+    openDetail(taskId);
+  }
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      showToast('Priority updated to ' + newPriority, 'success');
+      updateNotifications();
+    })
+    .withFailureHandler(function(err) {
+      t.priority = prevPriority;
+      renderView();
+      showToast('Failed to update priority: ' + (err.message || err), 'error');
+    })
+    .saveTaskToSheet(t);
+}
 
 function quickAssignTask(taskId, newAssignee) {
   var t = tasks.find(function(x){return x.id===taskId;});
