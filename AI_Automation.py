@@ -196,7 +196,8 @@ def get_vercel_site_url(project_dir):
         except Exception:
             pass
 
-    return "https://expenselive.vercel.app/"
+    proj_name = os.path.basename(project_dir).lower().replace(" ", "-")
+    return f"https://{proj_name}.vercel.app/"
 
 
 def get_vercel_project_name(project_dir):
@@ -242,7 +243,7 @@ def deploy_vercel(project_dir, auto=False):
     print(f"{CYAN}Running: {' '.join(cmd)}...{RESET}")
     proc = subprocess.run(cmd, cwd=project_dir)
 
-    live_url = get_vercel_site_url(project_dir) or "https://expenselive.vercel.app/"
+    live_url = get_vercel_site_url(project_dir)
     if proc.returncode == 0:
         print(f"\n{GREEN}{BOLD}🎉 SUCCESS! Deployed to Vercel successfully.{RESET}")
         print(f"👉 {BOLD}{CYAN}{live_url}{RESET}\n")
@@ -254,7 +255,7 @@ def deploy_vercel(project_dir, auto=False):
 
 def open_vercel_site(project_dir):
     """Open active Vercel site in browser."""
-    url = get_vercel_site_url(project_dir) or "https://expenselive.vercel.app/"
+    url = get_vercel_site_url(project_dir)
     print(f"\n{CYAN}Opening Vercel site in browser:{RESET} {GREEN}{url}{RESET}")
     open_url_in_browser(url)
 
