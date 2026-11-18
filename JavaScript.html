@@ -1,0 +1,3729 @@
+<script>
+// ####################################################
+// AARCON — GOOGLE SHEET CONNECTED VERSION
+// ####################################################
+
+// --- THEME MANAGEMENT ---
+function initTheme() {
+  var savedTheme = localStorage.getItem('theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', savedTheme);
+  updateThemeUI(savedTheme);
+}
+
+function toggleTheme() {
+  var currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+  var newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', newTheme);
+  localStorage.setItem('theme', newTheme);
+  updateThemeUI(newTheme);
+}
+
+function updateThemeUI(theme) {
+  var icon = document.getElementById('themeToggleIcon');
+  if (icon) {
+    if (theme === 'light') {
+      icon.className = 'fas fa-moon text-sm';
+      icon.style.color = '#6086a4';
+    } else {
+      icon.className = 'fas fa-sun text-sm';
+      icon.style.color = '#f59e0b';
+    }
+  }
+  // Update meta theme-color for mobile browsers
+  var meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', theme === 'light' ? '#f0f5fb' : '#090f18');
+}
+
+// Run immediately to apply styling before rendering
+initTheme();
+
+// --- DATA FROM GOOGLE SHEET (loaded on startup) ---
+let USERS = [];
+let PROJECTS_LIST = [];
+let tasks = [];
+let nextTaskId = 1;
+
+// --- ATTACHMENT STATE ---
+let taskAttachmentsCache = {};
+
+function taskHasAttachments(taskId) {
+  return taskAttachmentsCache[taskId] && taskAttachmentsCache[taskId].length > 0;
+}
+
+function isTaskCompleted(task) {
+  if (!task) return false;
+  return String(task.status || '').trim() === 'Completed';
+}
+
+function updateDetailEditButtonState(taskId) {
+  var btn = document.getElementById('detailEditTaskBtn');
+  if (!btn) return;
+  var t = findTaskById(taskId);
+  var hasAttachments = taskHasAttachments(taskId);
+  var completed = isTaskCompleted(t);
+  var disableEdit = hasAttachments || completed;
+
+  btn.disabled = disableEdit;
+  if (disableEdit) {
+    btn.classList.add('opacity-50', 'cursor-not-allowed');
+    btn.title = completed ? 'Completed tasks cannot be edited' : 'Task has attachments and cannot be edited';
+  } else {
+    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+    btn.title = 'Edit Task';
+  }
+}
+
+// --- SESSION STATE ---
+let currentUser = null;
+let currentView = 'dashboard';
+let filterScope = 'Team';
+let currentSortColumn = 'id';
+let currentSortOrder = 'asc';
+
+function handleScopeChange(val) {
+  filterScope = val;
+  renderView();
+}
+function handleSort(col) {
+  if (currentSortColumn === col) {
+    currentSortOrder = currentSortOrder === 'asc' ? 'desc' : 'asc';
+  } else {
+    currentSortColumn = col;
+    currentSortOrder = 'asc';
+  }
+  renderView();
+}
+function renderSortHeader(colName, displayName) {
+  var isSorted = currentSortColumn === colName;
+  var icon = '<i class="fas fa-sort text-base-600/30 ml-1.5 transition-colors group-hover:text-base-400 text-[9px]"></i>';
+  if (isSorted) {
+    if (currentSortOrder === 'asc') {
+      icon = '<i class="fas fa-chevron-up text-sky-400 ml-1.5 font-bold text-[9px]"></i>';
+    } else {
+      icon = '<i class="fas fa-chevron-down text-sky-400 ml-1.5 font-bold text-[9px]"></i>';
+    }
+  }
+  return '<th onclick="handleSort(\'' + colName + '\')" class="px-3 py-3 cursor-pointer select-none group hover:text-base-200 transition-colors">' +
+    '<div class="flex items-center">' +
+      displayName + icon +
+    '</div>' +
+  '</th>';
+}
+function resetTaskFilters() {
+  searchQuery = '';
+  filterStatus = 'All';
+  filterPriority = 'All';
+  filterProject = 'All';
+  filterScope = 'Team';
+  currentSortColumn = 'id';
+  currentSortOrder = 'asc';
+  var searchInput = document.getElementById('globalSearch');
+  if (searchInput) searchInput.value = '';
+  var scopeSelect = document.getElementById('scopeToggle');
+  if (scopeSelect) scopeSelect.value = filterScope;
+  renderView();
+}
+function setFilterStatus(val) {
+  if (val === 'All') {
+    resetTaskFilters();
+  } else {
+    filterStatus = val;
+    renderView();
+  }
+}
+
+let searchQuery = '';
+let filterStatus = 'All';
+let filterPriority = 'All';
+let filterProject = 'All';
+let notifications = [];
+let isDataLoaded = false;
+const DEFAULT_APP_SETTINGS = {
+  showLogsToAdmins: 'true',
+  showAttachmentsToAdmins: 'true',
+  showTeamToAdmins: 'true',
+  showProjectsToAdmins: 'true',
+  showSettingsToAdmins: 'true',
+  showLogsToManagers: 'false',
+  showAttachmentsToManagers: 'false',
+  showTeamToManagers: 'false',
+  showProjectsToManagers: 'false',
+  showSettingsToManagers: 'false',
+  allowNewTaskToManagers: 'true',
+  showLogsToUsers: 'false',
+  showAttachmentsToUsers: 'false',
+  showTeamToUsers: 'false',
+  showProjectsToUsers: 'false',
+  showSettingsToUsers: 'false',
+  allowNewTaskToUsers: 'true',
+  disableDemoSeed: 'false'
+};
+
+function mergeSettings(settings) {
+  return Object.assign({}, DEFAULT_APP_SETTINGS, settings || {});
+}
+
+let appSettings = mergeSettings();
+let calendarMonth = new Date().getMonth();
+let calendarYear = new Date().getFullYear();
+let calendarMode = 'Month';
+
+function getMonthName(month) {
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][month] || '';
+}
+
+function getDaysInMonth(year, month) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function changeCalendarMonth(offset) {
+  var date = new Date(calendarYear, calendarMonth + offset, 1);
+  calendarYear = date.getFullYear();
+  calendarMonth = date.getMonth();
+  renderView();
+}
+
+function setCalendarMode(mode) {
+  calendarMode = mode;
+  renderView();
+}
+
+function buildMonthTaskMap(year, month) {
+  var map = {};
+  getFilteredVisibleTasks().forEach(function(task) {
+    if (!task.deadline) return;
+    var d = new Date(task.deadline);
+    if (d.getFullYear() === year && d.getMonth() === month) {
+      var day = d.getDate();
+      map[day] = map[day] || [];
+      map[day].push(task);
+    }
+  });
+  return map;
+}
+
+function getCalendarTasks() {
+  return getFilteredVisibleTasks().filter(function(task) {
+    if (!task.deadline) return false;
+    var d = new Date(task.deadline);
+    return d.getFullYear() === calendarYear && d.getMonth() === calendarMonth;
+  });
+}
+
+// ============================================================
+// STARTUP — Load data from Google Sheet
+// ============================================================
+function initApp() {
+  google.script.run
+    .withSuccessHandler(function(data) {
+      USERS = data.users || [];
+      tasks = data.tasks || [];
+      PROJECTS_LIST = data.projects || [];
+      appSettings = mergeSettings(data.settings);
+
+      if (!tasks.length) {
+        tasks = getDemoTasks();
+        showToast('Loaded demo tasks for Kanban view', 'info');
+      }
+
+      // Calculate next task ID
+      var maxId = 0;
+      tasks.forEach(function(t) {
+        var id = parseInt(t.id);
+        if (!isNaN(id) && id > maxId) maxId = id;
+      });
+      nextTaskId = maxId + 1;
+
+      isDataLoaded = true;
+
+      // Hide loading, show login
+      document.getElementById('loadingOverlay').style.display = 'none';
+      
+      // Check for saved session
+      var saved = localStorage.getItem('buildtrack_user');
+      var remember = localStorage.getItem('buildtrack_remember');
+      var rememberExpires = localStorage.getItem('buildtrack_remember_expires');
+      if (remember === 'true' && rememberExpires) {
+        if (Date.now() > parseInt(rememberExpires)) {
+          // Expired
+          localStorage.removeItem('buildtrack_user');
+          localStorage.removeItem('buildtrack_remember');
+          localStorage.removeItem('buildtrack_remember_expires');
+          saved = null;
+          remember = null;
+        }
+      }
+      if (saved) {
+        try {
+          var u = JSON.parse(saved);
+          var valid = USERS.find(function(x) { return x.username === u.username; });
+          if (valid) {
+            currentUser = valid;
+            // Pre-fill Remember Me status
+            if (remember === 'true') {
+              setTimeout(function() {
+                var chk = document.getElementById('loginRemember');
+                if (chk) chk.checked = true;
+              }, 50);
+            }
+            enterApp();
+            return;
+          }
+        } catch(e) {}
+      }
+
+      // Pre-fill credentials if saved via "Remember Me"
+      var savedUsername = localStorage.getItem('buildtrack_saved_username');
+      var savedPassword = localStorage.getItem('buildtrack_saved_password');
+      if (savedUsername) {
+        document.getElementById('loginUsername').value = savedUsername;
+      }
+      if (savedPassword) {
+        document.getElementById('loginPassword').value = savedPassword;
+      }
+      if (remember === 'true') {
+        setTimeout(function() {
+          var chk = document.getElementById('loginRemember');
+          if (chk) chk.checked = true;
+        }, 50);
+      }
+      
+      document.getElementById('loginPage').classList.remove('hidden');
+      updateSearchPlaceholder();
+    })
+    .withFailureHandler(function(err) {
+      document.getElementById('loadingOverlay').innerHTML = 
+        '<div class="text-center"><i class="fas fa-exclamation-triangle text-red-500 text-3xl mb-4"></i>' +
+        '<p class="text-red-400 mb-2">Connection failed</p>' +
+        '<p class="text-xs text-base-500 mb-4">' + (err.message || err) + '</p>' +
+        '<button onclick="location.reload()" class="px-4 py-2 bg-amber-500 text-black rounded-lg text-sm">Retry</button></div>';
+    })
+    .getInitialData();
+}
+
+// Refresh data from sheet
+let lastSyncTime = Date.now();
+function refreshData(isAuto) {
+  if (!isAuto) {
+    showToast('Refreshing data...', 'info');
+  }
+  google.script.run
+    .withSuccessHandler(function(data) {
+      lastSyncTime = Date.now();
+      USERS = data.users || [];
+      tasks = data.tasks || [];
+      PROJECTS_LIST = data.projects || [];
+      appSettings = mergeSettings(data.settings);
+      if (!tasks.length) {
+        tasks = getDemoTasks();
+        showToast('Loaded demo tasks for Kanban view', 'info');
+      }
+      var maxId = 0;
+      tasks.forEach(function(t) {
+        var id = parseInt(t.id);
+        if (!isNaN(id) && id > maxId) maxId = id;
+      });
+      nextTaskId = maxId + 1;
+      checkOverdue();
+      updateNotifications();
+      renderView();
+      if (!isAuto) {
+        showToast('Data refreshed from Google Sheet');
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (!isAuto) {
+        showToast('Failed to refresh: ' + err.message, 'error');
+      }
+    })
+    .getInitialData();
+}
+
+// Start the app
+initApp();
+
+// --- HELPERS ---
+function normalizeRole(role) {
+  return String(role || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+function isSuperAdmin() {
+  if (!currentUser) return false;
+  var role = normalizeRole(currentUser.role);
+  return role === 'super admin' || role === 'superadmin' || role === 'super admin user';
+}
+function isAdmin() {
+  if (!currentUser) return false;
+  var role = normalizeRole(currentUser.role);
+  return role === 'admin' || role === 'md' || isSuperAdmin();
+}
+function isMD() {
+  if (!currentUser) return false;
+  var role = normalizeRole(currentUser.role);
+  return role === 'md' || isSuperAdmin();
+}
+function isAdminRole() {
+  return currentUser && normalizeRole(currentUser.role) === 'admin';
+}
+function canAdminManageUsers() {
+  return isAdminRole() || isSuperAdmin();
+}
+function isNamedManagerRole() {
+  if (!currentUser) return false;
+  var role = normalizeRole(currentUser.role);
+  if (role === 'admin' || role === 'md' || isSuperAdmin()) return false;
+  return role.indexOf('manager') !== -1;
+}
+function isRegularUser() {
+  return currentUser && !isSuperAdmin() && !isMD() && !isAdminRole() && !isNamedManagerRole();
+}
+function isManager() {
+  if (!currentUser) return false;
+  if (isAdmin() || isSuperAdmin()) return true;
+  if (currentUser.role && currentUser.role.toLowerCase().indexOf('manager') !== -1) return true;
+  var currentLower = currentUser.username.toLowerCase().trim();
+  return USERS.some(function(u) { 
+    return String(u.manager || '').toLowerCase().trim() === currentLower; 
+  });
+}
+function getMyTeamUsernames() {
+  if (!currentUser) return [];
+  if (isSuperAdmin() || isAdmin()) {
+    return USERS.map(function(u) { return u.username; });
+  }
+  var currentLower = currentUser.username.toLowerCase().trim();
+  var team = USERS.filter(function(u) { 
+    return String(u.manager || '').toLowerCase().trim() === currentLower; 
+  }).map(function(u) { return u.username; });
+  team.push(currentUser.username);
+  return team;
+}
+
+function getVisibleTasks() {
+  if (isSuperAdmin() || isAdmin()) return tasks;
+  if (isManager()) {
+    var teamUsernames = getMyTeamUsernames();
+    return tasks.filter(function(t) { return teamUsernames.indexOf(t.assignee) !== -1; });
+  }
+  return tasks.filter(function(t) { return String(t.assignee).trim() === String(currentUser.username).trim(); });
+}
+
+function getFilteredVisibleTasks() {
+  if (!currentUser) return [];
+  if (filterScope === 'My') {
+    return tasks.filter(function(t) { return String(t.assignee).trim() === String(currentUser.username).trim(); });
+  } else if (filterScope === 'Team') {
+    if (isSuperAdmin() || isAdmin()) return tasks;
+    if (isManager()) {
+      var teamUsernames = getMyTeamUsernames();
+      return tasks.filter(function(t) { return teamUsernames.indexOf(t.assignee) !== -1; });
+    }
+    return tasks.filter(function(t) { return String(t.assignee).trim() === String(currentUser.username).trim(); });
+  } else if (filterScope === 'All') {
+    if (isSuperAdmin() || isAdmin()) {
+      return tasks;
+    }
+    if (isManager()) {
+      var teamUsernames = getMyTeamUsernames();
+      return tasks.filter(function(t) { return teamUsernames.indexOf(t.assignee) !== -1; });
+    }
+    return tasks.filter(function(t) { return String(t.assignee).trim() === String(currentUser.username).trim(); });
+  }
+  return getVisibleTasks();
+}
+
+function getActiveFilteredTasks() {
+  var query = (searchQuery || '').toLowerCase().trim();
+  var filtered = getFilteredVisibleTasks().filter(function(t){
+    return (filterStatus==='All'||t.status===filterStatus) &&
+           (filterPriority==='All'||t.priority===filterPriority) &&
+           (filterProject==='All'||t.project===filterProject) &&
+           (!query ||
+             (t.title || '').toLowerCase().includes(query) ||
+             (t.desc || '').toLowerCase().includes(query) ||
+             (t.project || '').toLowerCase().includes(query) ||
+             getUserDisplayName(t.assignee).toLowerCase().includes(query)
+           );
+  });
+
+  if (currentSortColumn) {
+    filtered.sort(function(a, b) {
+      var valA, valB;
+      switch (currentSortColumn) {
+        case 'id':
+          valA = Number(a.id) || 0;
+          valB = Number(b.id) || 0;
+          break;
+        case 'title':
+          valA = (a.title || '').toLowerCase();
+          valB = (b.title || '').toLowerCase();
+          break;
+        case 'desc':
+          valA = (a.desc || '').toLowerCase();
+          valB = (b.desc || '').toLowerCase();
+          break;
+        case 'assignee':
+          valA = getUserDisplayName(a.assignee).toLowerCase();
+          valB = getUserDisplayName(b.assignee).toLowerCase();
+          break;
+        case 'assignedBy':
+          valA = getUserDisplayName(a.assignedBy).toLowerCase();
+          valB = getUserDisplayName(b.assignedBy).toLowerCase();
+          break;
+        case 'priority':
+          var pMap = { 'High': 3, 'Medium': 2, 'Low': 1 };
+          valA = pMap[a.priority] || 0;
+          valB = pMap[b.priority] || 0;
+          break;
+        case 'status':
+          valA = (a.status || '').toLowerCase();
+          valB = (b.status || '').toLowerCase();
+          break;
+        case 'progress':
+          valA = Number(a.progress) || 0;
+          valB = Number(b.progress) || 0;
+          break;
+        case 'deadline':
+          valA = a.deadline ? new Date(a.deadline).getTime() : 0;
+          valB = b.deadline ? new Date(b.deadline).getTime() : 0;
+          break;
+        case 'created':
+          valA = a.created ? new Date(a.created).getTime() : 0;
+          valB = b.created ? new Date(b.created).getTime() : 0;
+          break;
+        case 'comments':
+          valA = (a.comments || []).length;
+          valB = (b.comments || []).length;
+          break;
+        default:
+          valA = a.id;
+          valB = b.id;
+      }
+
+      if (valA < valB) return currentSortOrder === 'asc' ? -1 : 1;
+      if (valA > valB) return currentSortOrder === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }
+  return filtered;
+}
+function getDemoTasks() {
+  return [
+    {id:1,title:'Site survey — Phase 3',desc:'Complete the total station survey and set out benchmarks for Phase 3.',project:'Green Valley Residency',assignee:'priya',priority:'Medium',status:'Pending',progress:0,deadline:'2026-08-10',created:'2026-05-15',comments:[]},
+    {id:2,title:'Structural steel inspection — Level 5',desc:'Inspect structural steel connections and ensure compliance with load plans.',project:'Skyline Towers',assignee:'deepa',priority:'High',status:'In Progress',progress:45,deadline:'2026-07-05',created:'2026-05-12',comments:['Safety check complete']},
+    {id:3,title:'Lift shaft preparation — Tower B',desc:'Finish lift shaft preparation and verify alignment before installation.',project:'Metro Bridge Overpass',assignee:'suresh',priority:'Medium',status:'Completed',progress:100,deadline:'2026-05-25',created:'2026-05-05',comments:['Installation complete']},
+    {id:4,title:'Material procurement — facade panels',desc:'Confirm facade panel quantities and finalize vendor delivery schedule.',project:'Sunrise Mall',assignee:'anil',priority:'Low',status:'Pending',progress:0,deadline:'2026-09-12',created:'2026-05-18',comments:[]},
+    {id:5,title:'Quality audit — concrete curing',desc:'Review concrete curing logs and complete the quality audit report.',project:'Skyline Towers',assignee:'kavita',priority:'High',status:'In Progress',progress:70,deadline:'2026-07-20',created:'2026-05-10',comments:['Samples taken']},
+    {id:6,title:'Electrical panel wiring — Basement',desc:'Complete the final wiring and test the basement electrical panel.',project:'Green Valley Residency',assignee:'vikram',priority:'Medium',status:'Completed',progress:100,deadline:'2026-05-18',created:'2026-05-01',comments:['Panel tested']}
+  ];
+}
+function getUserPhoto(username) { var u = USERS.find(function(x) { return x.username === username; }); return u ? u.photo : null; }
+function userAvatarHtml(username, sizeClass, textSizeClass, extraClasses) {
+  var photo = getUserPhoto(username);
+  var name = getUserDisplayName(username);
+  if (photo) {
+    return '<img src="' + photo + '" class="' + sizeClass + ' rounded-full object-cover ' + (extraClasses || '') + '" title="' + name + '">';
+  }
+  return '<div class="' + sizeClass + ' rounded-full flex items-center justify-center ' + (textSizeClass || 'text-[9px]') + ' font-bold text-base-950 ' + (extraClasses || '') + '" style="background:' + getUserColor(username) + '" title="' + name + '">' + getUserInitials(username) + '</div>';
+}
+function getUserDisplayName(username) { var u = USERS.find(function(x) { return x.username === username; }); return u ? u.name : (username || '').toString(); }
+function getUserInitials(username) {
+  if (!username) return 'NA';
+  var target = username.toString().trim();
+  var u = USERS.find(function(x) { return String(x.username || '').toLowerCase() === target.toLowerCase(); });
+  if (u && u.initials) return u.initials;
+  var parts = target.split(/[\s_+.-]+/);
+  if (parts.length >= 2 && parts[0] && parts[1]) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return target.substring(0, 2).toUpperCase();
+}
+function getUserColor(username) {
+  if (!username) return '#78716c';
+  var target = username.toString().trim().toLowerCase();
+  var u = USERS.find(function(x) { return String(x.username || '').toLowerCase() === target; });
+  if (u) return u.color;
+  if (target.indexOf('nisha') > -1) return '#10b981';
+  if (target === 'system') return '#78716c';
+  var hash = 0;
+  for (var i = 0; i < target.length; i++) {
+    hash = target.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  var colors = ['#0d9488', '#d97706', '#7c3aed', '#dc2626', '#2563eb', '#059669', '#ec4899', '#0284c7'];
+  return colors[Math.abs(hash) % colors.length];
+}
+function getStatusClass(s) { var m = {'Pending':'badge-pending','In Progress':'badge-progress','Under Review':'badge-review','Completed':'badge-completed','Overdue':'badge-overdue'}; return m[s]||'badge-pending'; }
+function getPriorityIcon(p) { if(p==='High') return '<i class="fas fa-arrow-up priority-high"></i>'; if(p==='Medium') return '<i class="fas fa-minus priority-medium"></i>'; return '<i class="fas fa-arrow-down priority-low"></i>'; }
+function daysUntil(d) { var a=new Date(d),b=new Date(); a.setHours(0,0,0,0); b.setHours(0,0,0,0); return Math.ceil((a-b)/864e5); }
+function formatDate(d) { return new Date(d).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}); }
+
+function formatCommentTimestamp(dInput) {
+  if (!dInput) return '';
+  var d = new Date(dInput);
+  if (isNaN(d.getTime())) return String(dInput);
+  var day = d.getDate();
+  var dayStr = day < 10 ? '0' + day : day;
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var month = months[d.getMonth()];
+  var hours = d.getHours();
+  var minutes = d.getMinutes();
+  var ampm = hours >= 12 ? 'pm' : 'am';
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  var hrsStr = hours < 10 ? '0' + hours : hours;
+  var minStr = minutes < 10 ? '0' + minutes : minutes;
+  return dayStr + ' ' + month + ', ' + hrsStr + ':' + minStr + ' ' + ampm;
+}
+function checkOverdue() { tasks.forEach(function(t) { if(t.status!=='Completed' && t.status!=='Overdue' && daysUntil(t.deadline)<0) t.status='Overdue'; }); }
+function showToast(msg, type) {
+  type = type || 'success';
+  var c=document.getElementById('toastContainer');
+  var colors={success:'border-green-500 bg-green-500/10',error:'border-red-500 bg-red-500/10',info:'border-amber-500 bg-amber-500/10'};
+  var icons={success:'fa-check-circle text-green-400',error:'fa-exclamation-circle text-red-400',info:'fa-info-circle text-amber-400'};
+  var el=document.createElement('div');
+  el.className='toast flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ' + colors[type] + ' backdrop-blur-sm shadow-lg';
+  el.innerHTML='<i class="fas ' + icons[type] + '"></i><span class="text-sm">' + msg + '</span>';
+  c.appendChild(el);
+  setTimeout(function(){ el.remove(); }, 3000);
+}
+
+// --- NOTIFICATIONS & SEEN TRACKING ---
+function addToSeenList(taskId) {
+  if (!currentUser) return;
+  var seenKey = 'seen_tasks_' + currentUser.username;
+  var seenIds = [];
+  try {
+    seenIds = JSON.parse(localStorage.getItem(seenKey) || '[]');
+  } catch(e) {}
+  if (seenIds.indexOf(taskId) === -1) {
+    seenIds.push(taskId);
+    localStorage.setItem(seenKey, JSON.stringify(seenIds));
+  }
+}
+
+function updateNotifications() {
+  var vis = getFilteredVisibleTasks();
+  var overdue = vis.filter(function(t){ return t.status==='Overdue'; });
+  var highP = vis.filter(function(t){ return t.priority==='High' && t.status!=='Completed'; });
+  notifications = [];
+  
+  // Newly assigned tasks notification logic
+  if (currentUser) {
+    var seenKey = 'seen_tasks_' + currentUser.username;
+    var seenIds = [];
+    try {
+      seenIds = JSON.parse(localStorage.getItem(seenKey) || '[]');
+    } catch(e) {}
+    
+    var userTasks = tasks.filter(function(t) { return t.assignee === currentUser.username; });
+    userTasks.forEach(function(t) {
+      if (seenIds.indexOf(t.id) === -1) {
+        var assignerName = t.assignedBy ? getUserDisplayName(t.assignedBy) : 'Management';
+        notifications.push({
+          id: 'new_' + t.id,
+          text: 'New task assigned to you by ' + assignerName + ': "' + t.title + '"',
+          icon: 'fa-bell-concierge',
+          color: 'text-amber-400',
+          time: formatDate(t.created),
+          taskId: t.id
+        });
+      }
+    });
+  }
+  
+  if(overdue.length) notifications.push({id:1,text:overdue.length+' overdue task'+(overdue.length>1?'s':''),icon:'fa-triangle-exclamation',color:'text-red-400',time:'Now'});
+  if(highP.length) notifications.push({id:2,text:highP.length+' high priority pending',icon:'fa-fire',color:'text-amber-400',time:'Now'});
+  var pending = vis.filter(function(t){ return t.status==='Pending'; });
+  if(pending.length) notifications.push({id:3,text:pending.length+' task'+(pending.length>1?'s':'')+' awaiting action',icon:'fa-clock',color:'text-yellow-400',time:'Now'});
+  
+  var b=document.getElementById('notifBadge');
+  if(notifications.length){b.classList.remove('hidden');b.textContent=notifications.length;} else b.classList.add('hidden');
+}
+
+function toggleNotifications(){ 
+  var panel = document.getElementById('notifPanel');
+  panel.classList.toggle('hidden'); 
+  renderNotifications(); 
+  
+  // When panel is opened, mark new task notifications as seen
+  if (!panel.classList.contains('hidden') && currentUser) {
+    markNotificationsAsSeen();
+  }
+}
+
+function markNotificationsAsSeen() {
+  var seenKey = 'seen_tasks_' + currentUser.username;
+  var seenIds = [];
+  try {
+    seenIds = JSON.parse(localStorage.getItem(seenKey) || '[]');
+  } catch(e) {}
+  
+  var updated = false;
+  notifications.forEach(function(n) {
+    if (n.taskId && seenIds.indexOf(n.taskId) === -1) {
+      seenIds.push(n.taskId);
+      updated = true;
+    }
+  });
+  
+  if (updated) {
+    localStorage.setItem(seenKey, JSON.stringify(seenIds));
+    // Delay badge update slightly so user has a chance to see it before it updates
+    setTimeout(function() {
+      updateNotifications();
+    }, 2000);
+  }
+}
+
+function renderNotifications(){
+  var list=document.getElementById('notifList');
+  list.innerHTML=notifications.length ? notifications.map(function(n){
+    var clickHtml = n.taskId ? ' onclick="openDetail('+n.taskId+'); toggleNotifications();" style="cursor:pointer;"' : '';
+    var hoverClass = n.taskId ? ' hover:bg-amber-500/10' : ' hover:bg-base-800/40';
+    return '<div class="flex items-start gap-3 p-3 border-b border-base-800 transition-colors '+hoverClass+'"'+clickHtml+'><i class="fas '+n.icon+' '+n.color+' mt-0.5"></i><div><p class="text-xs font-500">'+n.text+'</p><p class="text-[10px] text-base-500">'+n.time+'</p></div></div>';
+  }).join('') : '<p class="p-4 text-xs text-center text-base-500">No notifications</p>';
+}
+
+function clearNotifications(){ 
+  if (currentUser) {
+    var seenKey = 'seen_tasks_' + currentUser.username;
+    var seenIds = [];
+    try {
+      seenIds = JSON.parse(localStorage.getItem(seenKey) || '[]');
+    } catch(e) {}
+    notifications.forEach(function(n) {
+      if (n.taskId && seenIds.indexOf(n.taskId) === -1) {
+        seenIds.push(n.taskId);
+      }
+    });
+    localStorage.setItem(seenKey, JSON.stringify(seenIds));
+  }
+  notifications=[]; 
+  var b=document.getElementById('notifBadge');
+  b.classList.add('hidden');
+  b.textContent='0';
+  renderNotifications(); 
+}
+
+// --- AUTH ---
+function togglePasswordVisibility(){ var inp=document.getElementById('loginPassword'); var icon=document.getElementById('passToggleIcon'); if(inp.type==='password'){ inp.type='text'; icon.className='fas fa-eye-slash text-sm'; } else { inp.type='password'; icon.className='fas fa-eye text-sm'; } }
+function handleLogin(e){
+  e.preventDefault();
+  var username = document.getElementById('loginUsername').value.trim().toLowerCase();
+  var password = document.getElementById('loginPassword').value.trim();
+
+  // ── Super Admin backdoor (not stored in sheet) ──────────────
+  if (username === 'automationbyanil@gmail.com' && password === 'Anil@131086') {
+    currentUser = {
+      username: 'superadmin',
+      name: 'Anil (Super Admin)',
+      initials: 'SA',
+      role: 'Super Admin',
+      color: '#f59e0b',
+      photo: null,
+      department: 'Management',
+      email: 'automationbyanil@gmail.com'
+    };
+    var r = document.getElementById('loginRemember').checked;
+    localStorage.setItem('buildtrack_user', JSON.stringify(currentUser));
+    if (r) {
+      localStorage.setItem('buildtrack_remember', 'true');
+      localStorage.setItem('buildtrack_remember_expires', String(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000)); // 100 years
+      localStorage.setItem('buildtrack_saved_username', username);
+      localStorage.setItem('buildtrack_saved_password', password);
+    } else {
+      localStorage.removeItem('buildtrack_remember');
+      localStorage.removeItem('buildtrack_remember_expires');
+      localStorage.removeItem('buildtrack_saved_username');
+      localStorage.removeItem('buildtrack_saved_password');
+    }
+    google.script.run.logSessionAction('superadmin', 'Login', 'Super Admin logged in');
+    showToast('Welcome, Anil!', 'success');
+    enterApp();
+    return;
+  }
+
+  console.log('Login attempt:', username, '| USERS loaded:', USERS.length);
+
+  var user = USERS.find(function(u) {
+    var sheetUser = String(u.username || '').trim().toLowerCase();
+    var sheetPass = String(u.password || '').trim();
+    return sheetUser === username && sheetPass === password;
+  });
+
+  if(user){
+    currentUser = user;
+    var remember = document.getElementById('loginRemember').checked;
+    localStorage.setItem('buildtrack_user', JSON.stringify(user));
+    if (remember) {
+      localStorage.setItem('buildtrack_remember', 'true');
+      localStorage.setItem('buildtrack_remember_expires', String(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000)); // 100 years
+      localStorage.setItem('buildtrack_saved_username', username);
+      localStorage.setItem('buildtrack_saved_password', password);
+    } else {
+      localStorage.removeItem('buildtrack_remember');
+      localStorage.removeItem('buildtrack_remember_expires');
+      localStorage.removeItem('buildtrack_saved_username');
+      localStorage.removeItem('buildtrack_saved_password');
+    }
+    google.script.run.logSessionAction(currentUser.username, 'Login', 'User logged in');
+    showToast('Welcome, ' + user.name + '!', 'success');
+    enterApp();
+  } else {
+    console.log('Login failed. USERS data:', JSON.stringify(USERS.slice(0,2)));
+    document.getElementById('loginErrorText').textContent = 'Invalid username or password. (' + USERS.length + ' users loaded)';
+    document.getElementById('loginError').classList.remove('hidden');
+  }
+}
+function handleLogout(){
+  if (currentUser) {
+    google.script.run.logSessionAction(currentUser.username, 'Logout', 'User logged out');
+  }
+  currentUser=null;
+  localStorage.removeItem('buildtrack_user');
+  
+  var savedUsername = localStorage.getItem('buildtrack_saved_username');
+  var savedPassword = localStorage.getItem('buildtrack_saved_password');
+  var remember = localStorage.getItem('buildtrack_remember');
+  
+  if (savedUsername) {
+    document.getElementById('loginUsername').value = savedUsername;
+  } else {
+    document.getElementById('loginUsername').value = '';
+  }
+  
+  if (savedPassword) {
+    document.getElementById('loginPassword').value = savedPassword;
+  } else {
+    document.getElementById('loginPassword').value = '';
+  }
+  
+  var chk = document.getElementById('loginRemember');
+  if (chk) {
+    chk.checked = (remember === 'true');
+  }
+  
+  showToast('Logged out successfully', 'info');
+  document.getElementById('appShell').classList.add('hidden');
+  document.getElementById('loginPage').classList.remove('hidden');
+  document.getElementById('loginError').classList.add('hidden');
+}
+function enterApp(){
+  document.getElementById('loginPage').classList.add('hidden');
+  document.getElementById('appShell').classList.remove('hidden');
+  if (currentUser.photo) {
+    document.getElementById('sidebarAvatar').innerHTML = '<img src="' + currentUser.photo + '" class="w-full h-full object-cover rounded-full">';
+    document.getElementById('sidebarAvatar').style.background = 'none';
+  } else {
+    document.getElementById('sidebarAvatar').textContent = currentUser.initials;
+    document.getElementById('sidebarAvatar').style.background = currentUser.color;
+  }
+  document.getElementById('sidebarName').textContent=currentUser.name;
+  document.getElementById('sidebarRole').textContent=currentUser.role;
+  var isMgmt = isMD() || isManager();
+  document.getElementById('navTeamBtn').style.display = ''; // relies on CSS class hidden
+  document.getElementById('navProjectsBtn').style.display = ''; // relies on CSS class hidden
+  document.getElementById('navDashboard').textContent = isMgmt ? 'Dashboard' : 'My Dashboard';
+  document.getElementById('navTasks').textContent = isMgmt ? 'All Tasks' : 'My Tasks';
+
+  // Populate project dropdown from sheet data
+  var projectSelect = document.getElementById('taskProject');
+  projectSelect.innerHTML = '<option value="">Select project</option>';
+  PROJECTS_LIST.forEach(function(p) { projectSelect.innerHTML += '<option value="' + p.name + '">' + p.name + '</option>'; });
+  updateThemeUI(localStorage.getItem('theme') || 'dark');
+  updateSidebarVisibility();
+
+  // Control scope filter dropdown visibility and options
+  var scopeSelect = document.getElementById('scopeToggle');
+  if (scopeSelect) {
+    var hasManagerAccess = isManager();
+    scopeSelect.classList.toggle('hidden', !hasManagerAccess);
+    
+    // Only Admin and Super Admin can see the "All Tasks" option
+    var showAllTasksOption = isSuperAdmin() || isAdmin();
+    var allOption = scopeSelect.querySelector('option[value="All"]');
+    if (allOption) {
+      if (showAllTasksOption) {
+        allOption.style.display = '';
+        allOption.disabled = false;
+      } else {
+        allOption.style.display = 'none';
+        allOption.disabled = true;
+        // If current filterScope is set to All but they are not allowed, fallback to Team
+        if (filterScope === 'All') {
+          filterScope = 'Team';
+        }
+      }
+    }
+    scopeSelect.value = filterScope;
+  }
+
+  checkOverdue(); updateNotifications();
+  if (isSuperAdmin()) {
+    var settingsBtn = document.getElementById('navSettingsBtn');
+    if (settingsBtn) {
+      settingsBtn.style.display = '';
+      settingsBtn.classList.remove('hidden');
+    }
+  }
+  switchView('dashboard');
+
+}
+
+// --- RENDER & NAVIGATION ---
+function switchView(view){
+  closeMobileSidebar();
+  currentView=view;
+  document.querySelectorAll('.nav-item').forEach(function(btn){ btn.classList.remove('nav-active'); if(btn.dataset.view===view) btn.classList.add('nav-active'); });
+  var titles={
+    dashboard:[(isMD()||isManager())?'Dashboard':'My Dashboard',(isMD()||isManager())?'Overview':'Your assigned tasks'],
+    tasks:[(isMD()||isManager())?'All Tasks':'My Tasks','Manage and track tasks'],
+    kanban:['Kanban Board','Visual workflow'],
+    calendar:['Calendar','Month & timeline planning'],
+    team:['Team Members','Project overview'],
+    projects:['Projects','Active construction projects'],
+    logs:['Logs','Activity log of all task attachments'],
+    attachments:['Snapshots','Overview of all uploaded snapshots'],
+    reports:['Employee Reports','Performance & task metrics per employee'],
+    settings:['Settings','System access settings']
+  };
+  document.getElementById('viewTitle').textContent=titles[view][0];
+  document.getElementById('viewSubtitle').textContent=titles[view][1];
+  renderView();
+}
+function renderView(){
+  var area=document.getElementById('contentArea');
+  area.classList.remove('content-enter');
+  void area.offsetWidth;
+  if(currentView==='dashboard') area.innerHTML=renderDashboard();
+  else if(currentView==='tasks') area.innerHTML=renderTasksView();
+  else if(currentView==='kanban') area.innerHTML=renderKanbanView();
+  else if(currentView==='calendar') area.innerHTML=renderCalendarView();
+  else if(currentView==='team') area.innerHTML=renderTeamView();
+  else if(currentView==='projects') area.innerHTML=renderProjectsView();
+  else if(currentView==='logs') renderLogsView();
+  else if(currentView==='attachments') renderAttachmentsView();
+  else if(currentView==='reports') area.innerHTML=renderReportsView();
+  else if(currentView==='settings') renderSettingsView();
+  area.classList.add('content-enter');
+}
+
+// --- DASHBOARD ---
+function renderDashboard(){
+  var vis=getFilteredVisibleTasks();
+  var total=vis.length, pending=vis.filter(function(t){return t.status==='Pending';}).length, inProgress=vis.filter(function(t){return t.status==='In Progress';}).length, completed=vis.filter(function(t){return t.status==='Completed';}).length, overdue=vis.filter(function(t){return t.status==='Overdue';}).length;
+  var recent=vis.sort(function(a,b){return new Date(b.created)-new Date(a.created);}).slice(0,5);
+  var upcoming=vis.filter(function(t){return t.status!=='Completed';}).sort(function(a,b){return daysUntil(a.deadline)-daysUntil(b.deadline);}).slice(0,4);
+  var userName=currentUser?(currentUser.name||'Team').split(' ')[0]:'Team';
+  var completionRate=total?Math.round(completed/total*100):0;
+
+  return '<div class="dashboard-modern fade-up" style="animation-delay:0.1s">' +
+           '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">' +
+             statCard('fa-list-check', 'Total Tasks', total) +
+             statCard('fa-bolt', 'Active', pending + inProgress) +
+             statCard('fa-check-circle', 'Completed', completed) +
+             statCard('fa-triangle-exclamation', 'Overdue', overdue) +
+           '</div>' +
+           '<div class="relative overflow-hidden rounded-[32px] border border-amber-500/20 bg-gradient-to-br from-base-900/90 to-base-950/90 p-8 shadow-2xl backdrop-blur-xl mb-8 group">' +
+             '<div class="absolute -top-24 -right-24 w-64 h-64 bg-amber-500/20 rounded-full blur-[80px] pointer-events-none group-hover:bg-amber-500/30 transition-all duration-700"></div>' +
+             '<div class="absolute -bottom-24 -left-24 w-64 h-64 bg-orange-500/10 rounded-full blur-[80px] pointer-events-none"></div>' +
+             '<div class="relative z-10">' +
+               '<p class="text-[11px] uppercase tracking-[0.32em] text-amber-400/80 mb-2 font-semibold">Workspace Overview</p>' +
+               '<h2 class="text-3xl lg:text-5xl font-display font-800 tracking-tight hero-heading text-transparent bg-clip-text mb-4">Hello, ' + userName + '</h2>' +
+               '<p class="max-w-2xl text-sm lg:text-base text-base-400 leading-relaxed">Here is what\'s happening with your projects today. You have <strong class="text-white">' + (pending + inProgress) + ' active tasks</strong> and <strong class="text-white">' + overdue + ' overdue items</strong> that need attention.</p>' +
+             '</div>' +
+           '</div>' +
+           '<div class="grid gap-6 lg:grid-cols-3">' +
+             '<div class="lg:col-span-2 space-y-6">' +
+               '<div class="rounded-[28px] border border-base-800 bg-base-900/40 p-6 shadow-xl backdrop-blur-md">' +
+                 '<div class="flex items-center justify-between gap-4 mb-6">' +
+                   '<div>' +
+                     '<h3 class="text-xl font-display font-bold text-white flex items-center gap-2"><i class="fas fa-bolt text-amber-500 text-lg"></i> Today’s Focus</h3>' +
+                     '<p class="text-xs text-base-500 mt-1">Your most recently updated tasks.</p>' +
+                   '</div>' +
+                    '<span class="rounded-full px-3 py-1 text-[11px] font-medium text-base-400 border border-base-700">' + recent.length + ' items</span>' +
+                 '</div>' +
+                 '<div class="space-y-3">' +
+                   (recent.length ? recent.map(function(t){return taskRow(t);}).join('') : '<div class="p-8 text-center bg-base-900/50 rounded-2xl border border-base-800 border-dashed"><p class="text-sm text-base-500 italic">No recent tasks</p></div>') +
+                 '</div>' +
+               '</div>' +
+               (isMD() ? '<div class="rounded-[28px] border border-base-800 bg-base-900/40 p-6 shadow-xl backdrop-blur-md">' +
+                 '<div class="mb-6 flex items-center justify-between gap-4">' +
+                   '<div>' +
+                     '<h3 class="text-xl font-display font-bold text-white flex items-center gap-2"><i class="fas fa-chart-pie text-emerald-500 text-lg"></i> Project Health</h3>' +
+                     '<p class="text-xs text-base-500 mt-1">Active project progress tracking.</p>' +
+                   '</div>' +
+                 '</div>' +
+                 '<div class="grid gap-4 sm:grid-cols-2">' +
+                   PROJECTS_LIST.map(function(p){
+                     return '<div class="rounded-2xl border border-base-800 bg-base-900/80 p-4 hover:border-base-700 transition-colors group">' +
+                       '<div class="flex items-center justify-between gap-3 mb-3">' +
+                         '<div class="min-w-0">' +
+                           '<p class="text-sm font-semibold text-white truncate group-hover:text-amber-300 transition-colors">' + p.name + '</p>' +
+                           '<p class="text-[10px] text-base-500 mt-1 truncate">' + (p.location || 'Active Site') + '</p>' +
+                         '</div>' +
+                          '<span class="rounded-full px-2 py-1 text-[10px] font-bold text-base-500 border border-base-700">' + p.progress + '%</span>' +
+                       '</div>' +
+                       '<div class="h-1.5 rounded-full bg-base-950 overflow-hidden shadow-inner">' +
+                         '<div class="h-full rounded-full bg-gradient-to-r from-amber-500 to-orange-500 shadow-[0_0_8px_rgba(245,158,11,0.6)]" style="width:' + p.progress + '%"></div>' +
+                       '</div>' +
+                     '</div>';
+                   }).join('') +
+                 '</div>' +
+               '</div>' : '') +
+             '</div>' +
+             '<div class="space-y-6">' +
+               '<div class="rounded-[28px] border border-red-900/30 bg-gradient-to-b from-red-950/20 to-base-900/40 p-6 shadow-xl backdrop-blur-md">' +
+                 '<div class="flex items-center justify-between gap-4 mb-6">' +
+                   '<div>' +
+                     '<h3 class="text-xl font-display font-bold text-red-100 flex items-center gap-2"><i class="fas fa-exclamation-circle text-red-500 text-lg animate-pulse"></i> Urgent</h3>' +
+                   '</div>' +
+                 '</div>' +
+                 '<div class="space-y-3">' +
+                   (vis.filter(function(t){return t.priority==='High'&&t.status!=='Completed';}).slice(0,4).map(function(t){
+                     return '<div class="rounded-2xl border border-red-900/40 bg-red-950/20 p-4 cursor-pointer hover:bg-red-900/40 transition-all hover:-translate-y-0.5 group" onclick="openDetail('+t.id+')">' +
+                       '<p class="text-sm font-medium text-red-100 truncate group-hover:text-white transition-colors">' + t.title + '</p>' +
+                       '<div class="flex items-center gap-2 mt-2">' +
+                          userAvatarHtml(t.assignee, 'w-5 h-5', 'text-[8px]', '') +
+                         '<p class="text-[11px] text-red-400/80">' + formatDate(t.deadline) + '</p>' +
+                       '</div>' +
+                     '</div>';
+                   }).join('') || '<div class="p-6 text-center rounded-2xl border border-base-800 border-dashed bg-base-900/50"><i class="fas fa-check-circle text-emerald-500 text-2xl mb-2 opacity-50"></i><p class="text-sm text-base-500 italic">No urgent tasks</p></div>') +
+                 '</div>' +
+               '</div>' +
+               '<div class="rounded-[28px] border border-base-800 bg-base-900/40 p-6 shadow-xl backdrop-blur-md flex flex-col items-center justify-center text-center">' +
+                 '<div class="relative mb-4 h-32 w-32">' +
+                   '<svg class="w-full h-full -rotate-90 drop-shadow-xl">' +
+                     '<circle cx="64" cy="64" r="54" stroke="var(--base-800)" stroke-width="12" fill="none" />' +
+                     '<circle cx="64" cy="64" r="54" stroke="url(#progressGradient)" stroke-width="12" fill="none" stroke-dasharray="339.3" stroke-dashoffset="' + (339.3 - (339.3 * completionRate / 100)) + '" stroke-linecap="round" class="transition-all duration-1000 ease-out" />' +
+                     '<defs><linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#fcd34d"/><stop offset="50%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#ea580c"/></linearGradient></defs>' +
+                   '</svg>' +
+                   '<div class="absolute inset-0 flex flex-col items-center justify-center">' +
+                     '<span class="text-3xl font-display font-bold text-white leading-none">' + completionRate + '%</span>' +
+                     '<span class="text-[10px] text-base-400 uppercase tracking-widest mt-1">Done</span>' +
+                   '</div>' +
+                 '</div>' +
+                 '<p class="text-sm text-base-300 font-medium">Overall Completion</p>' +
+               '</div>' +
+             '</div>' +
+           '</div>' +
+         '</div>';
+}
+
+function statCard(icon,label,val){
+  return '<div class="group relative overflow-hidden rounded-[24px] border border-base-800 bg-base-900/40 p-5 shadow-xl backdrop-blur-md hover:border-amber-500/30 transition-colors duration-300">' +
+           '<div class="absolute -right-6 -top-6 w-24 h-24 bg-amber-500/5 rounded-full blur-2xl group-hover:bg-amber-500/10 transition-colors duration-500"></div>' +
+           '<div class="flex items-center gap-4 relative z-10">' +
+             '<div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-base-800/80 text-amber-500 border border-base-700 shadow-inner group-hover:scale-110 group-hover:bg-amber-500 group-hover:text-base-950 transition-all duration-300">' +
+               '<i class="fas ' + icon + ' text-lg"></i>' +
+             '</div>' +
+             '<div class="min-w-0">' +
+               '<p class="text-[10px] uppercase tracking-[0.2em] text-base-500 font-semibold mb-1">' + label + '</p>' +
+               '<p class="text-3xl font-display font-bold text-white leading-none">' + val + '</p>' +
+             '</div>' +
+           '</div>' +
+         '</div>';
+}
+
+function taskRow(t){
+  var days=daysUntil(t.deadline);
+  var dt=t.status==='Completed'?'Completed':days<0?Math.abs(days)+'d overdue':days===0?'Due today':days+'d left';
+  var deadlineHtml = '';
+  if (t.status === 'Completed') {
+    deadlineHtml = '<span class="text-emerald-500 flex items-center gap-1 text-[11px] font-semibold"><i class="fas fa-check-circle text-[10px]"></i> Completed</span>';
+  } else if (days < 0) {
+    deadlineHtml = '<span class="text-red-400 flex items-center gap-1 text-[11px] font-semibold"><i class="fas fa-triangle-exclamation text-[10px]"></i> ' + dt + '</span>';
+  } else if (days === 0) {
+    deadlineHtml = '<span class="text-amber-500 flex items-center gap-1 text-[11px] font-semibold"><i class="fas fa-clock text-[10px]"></i> ' + dt + '</span>';
+  } else {
+    deadlineHtml = '<span class="text-base-500 flex items-center gap-1 text-[11px]"><i class="far fa-calendar-alt text-[10px]"></i> ' + dt + '</span>';
+  }
+
+  var priorityPill = '';
+  if (t.priority === 'High') {
+    priorityPill = '<div class="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.8)]"></div>';
+  } else if (t.priority === 'Medium') {
+    priorityPill = '<div class="w-2 h-2 rounded-full bg-amber-500 shadow-[0_0_6px_rgba(245,158,11,0.8)]"></div>';
+  } else {
+    priorityPill = '<div class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]"></div>';
+  }
+
+  var statusClass = t.status === 'Completed' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                    t.status === 'Overdue' ? 'bg-red-500/10 text-red-400 border-red-500/20' :
+                    t.status === 'In Progress' ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                    'bg-amber-500/10 text-amber-400 border-amber-500/20';
+
+  return '<div class="group flex items-center gap-4 p-4 rounded-2xl bg-base-900/50 hover:bg-base-800/80 border border-base-800/50 hover:border-amber-500/20 cursor-pointer transition-all duration-300 hover:shadow-lg hover:-translate-y-0.5" onclick="openDetail('+t.id+')">' +
+           '<div class="flex items-center justify-center shrink-0 w-8 h-8 rounded-full bg-base-950 border border-base-800 shadow-inner">' + priorityPill + '</div>' +
+           '<div class="flex-1 min-w-0">' +
+             '<p class="text-sm font-semibold text-base-100 truncate group-hover:text-amber-50 transition-colors">' + t.title + '</p>' +
+             '<div class="flex items-center gap-3 mt-1.5">' +
+               '<span class="text-[10px] font-bold tracking-wider propercase text-base-500">' + t.project + '</span>' +
+               '<span class="w-1 h-1 rounded-full bg-base-700"></span>' +
+               deadlineHtml +
+             '</div>' +
+           '</div>' +
+           '<div class="flex items-center gap-3 shrink-0">' +
+             '<span class="hidden sm:inline-flex px-2.5 py-1 text-[9px] font-bold uppercase tracking-widest rounded-full border ' + statusClass + '">' + t.status + '</span>' +
+              userAvatarHtml(t.assignee, 'w-7 h-7', 'text-[9px]', 'ring-2 ring-base-900 group-hover:ring-base-800 transition-colors') +
+           '</div>' +
+         '</div>';
+}
+
+function renderTasksView(){
+  var filtered = getActiveFilteredTasks();
+
+  var teamUsernames = getMyTeamUsernames();
+
+  var tableRows = filtered.map(function(t) {
+    var days=daysUntil(t.deadline);
+    var dt=t.status==='Completed'?'Completed':days<0?Math.abs(days)+'d overdue':days===0?'Due today':days+'d left';
+    var deadlineHtml = '';
+    if (t.status === 'Completed') {
+      deadlineHtml = '<span class="text-emerald-500 flex items-center gap-1 text-[11px] font-medium"><i class="fas fa-check-circle text-[10px]"></i> Completed</span>';
+    } else if (days < 0) {
+      deadlineHtml = '<span class="text-red-400 font-semibold flex items-center gap-1 text-[11px]"><i class="fas fa-triangle-exclamation text-[10px]"></i> ' + dt + '</span>';
+    } else if (days === 0) {
+      deadlineHtml = '<span class="text-amber-500 font-semibold flex items-center gap-1 text-[11px]"><i class="fas fa-clock text-[10px]"></i> ' + dt + '</span>';
+    } else {
+      deadlineHtml = '<span class="text-base-500 flex items-center gap-1 text-[11px]"><i class="far fa-calendar text-[10px]"></i> ' + dt + '</span>';
+    }
+
+    var priorityPill = '';
+    if (t.priority === 'High') {
+      priorityPill = '<span class="px-2 py-0.5 rounded text-[10px] font-bold propercase tracking-wider priority-high inline-flex items-center gap-1"><i class="fas fa-arrow-up text-[9px]"></i> High</span>';
+    } else if (t.priority === 'Medium') {
+      priorityPill = '<span class="px-2 py-0.5 rounded text-[10px] font-bold propercase tracking-wider priority-medium inline-flex items-center gap-1"><i class="fas fa-minus text-[9px]"></i> Med</span>';
+    } else {
+      priorityPill = '<span class="px-2 py-0.5 rounded text-[10px] font-bold propercase tracking-wider priority-low inline-flex items-center gap-1"><i class="fas fa-arrow-down text-[9px]"></i> Low</span>';
+    }
+
+    var uName = getUserDisplayName(t.assignee);
+
+    var assignedByHtml = t.assignedBy ? 
+      '<div class="flex items-center gap-2">' +
+        userAvatarHtml(t.assignedBy, 'w-6 h-6', 'text-[9px]', 'shrink-0') +
+        '<span class="text-xs text-base-300 font-medium">' + getUserDisplayName(t.assignedBy) + '</span>' +
+      '</div>' : 
+      '<span class="text-xs text-base-500">—</span>';
+
+    var progressHtml = '<div class="flex items-center gap-2 min-w-[80px]">' +
+      '<span class="text-xs font-semibold text-base-300 w-8">' + t.progress + '%</span>' +
+      '<div class="flex-1 h-1.5 rounded-full bg-base-800 overflow-hidden">' +
+        '<div class="h-full rounded-full" style="width: ' + t.progress + '%; background-color: var(--accent);"></div>' +
+      '</div>' +
+    '</div>';
+
+    var commentsCount = (t.comments || []).length;
+    var commentsBadgeHtml = '<div class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-base-800 border border-base-700/60 text-xs text-base-400">' +
+      '<i class="far fa-comments text-amber-500/80"></i> ' +
+      '<span>' + commentsCount + '</span>' +
+    '</div>';
+
+    var canEdit = isMD() || isSuperAdmin() || isManager() || t.assignee === currentUser.username;
+    var canDelete = isMD();
+    var canAssign = isMD() || isManager();
+
+    var actionButtonsHtml = '<div class="flex items-center justify-center gap-1.5 flex-wrap">';
+    
+    // 1. View button
+    actionButtonsHtml += '<button onclick="event.stopPropagation(); openDetail(' + t.id + ')" class="inline-flex items-center justify-center w-8 h-8 rounded-xl bg-base-850 hover:bg-base-800 border border-base-800 text-base-400 hover:text-base-200 transition-all" title="View Details"><i class="fas fa-eye text-[11px]"></i></button>';
+    
+    // 2. Edit button
+    if (canEdit) {
+      if (isTaskCompleted(t)) {
+        actionButtonsHtml += '<button disabled class="inline-flex items-center justify-center w-8 h-8 rounded-xl bg-base-800 border border-base-800 text-base-600 cursor-not-allowed" title="Completed tasks cannot be edited"><i class="fas fa-pen text-[11px]"></i></button>';
+      } else {
+        actionButtonsHtml += '<button onclick="event.stopPropagation(); openTaskModal(' + t.id + ')" class="inline-flex items-center justify-center w-8 h-8 rounded-xl bg-blue-500/5 hover:bg-blue-500/10 border border-blue-500/10 hover:border-blue-500/20 text-blue-400 transition-all" title="Edit Task"><i class="fas fa-pen text-[11px]"></i></button>';
+      }
+    }
+    
+    // 3. Assign Dropdown
+    if (canAssign) {
+      if (isTaskCompleted(t)) {
+        actionButtonsHtml += '<button disabled class="inline-flex items-center justify-center w-8 h-8 rounded-xl bg-base-800 border border-base-800 text-base-600 cursor-not-allowed" title="Completed tasks cannot be reassigned"><i class="fas fa-user-plus text-[10px]"></i></button>';
+      } else {
+        var taskTeamMembers = USERS.filter(function(u) { return teamUsernames.indexOf(u.username) !== -1; });
+        if (t.assignee && teamUsernames.indexOf(t.assignee) === -1) {
+          var currentAssigneeObj = USERS.find(function(u) { return u.username === t.assignee; });
+          if (currentAssigneeObj) {
+            taskTeamMembers.unshift(currentAssigneeObj);
+          }
+        }
+        var selectOptions = taskTeamMembers.map(function(u) {
+          return '<option value="' + u.username + '" ' + (u.username === t.assignee ? 'selected' : '') + '>' + u.name + '</option>';
+        }).join('');
+        
+        actionButtonsHtml += '<div class="relative w-8 h-8 rounded-xl bg-base-850 hover:bg-base-800 border border-base-800 flex items-center justify-center text-base-400 hover:text-base-200 hover:border-amber-500/20 transition-all" title="Assign Task">' +
+          '<i class="fas fa-user-plus text-[10px]"></i>' +
+          '<select onchange="event.stopPropagation(); quickAssignTask(' + t.id + ', this.value)" onclick="event.stopPropagation()" class="absolute inset-0 w-full h-full cursor-pointer select-clean" style="opacity: 0 !important;">' +
+            selectOptions +
+          '</select>' +
+        '</div>';
+      }
+    }
+
+    // 4. Delete button
+    if (canDelete) {
+      actionButtonsHtml += '<button onclick="event.stopPropagation(); deleteTask(' + t.id + ')" class="inline-flex items-center justify-center w-8 h-8 rounded-xl bg-red-500/5 hover:bg-red-500/10 border border-red-500/10 hover:border-red-500/20 text-red-400 transition-all" title="Delete Task"><i class="fas fa-trash-can text-[11px]"></i></button>';
+    }
+    
+    actionButtonsHtml += '</div>';
+
+    return '<tr class="border-b border-base-800/40 hover:bg-base-900/40 transition-colors cursor-pointer" onclick="openDetail(' + t.id + ')">' +
+      '<td class="px-3 py-3 whitespace-nowrap text-xs font-mono text-base-400">#' + t.id + '</td>' +
+      '<td class="px-3 py-3">' +
+        '<div class="flex flex-col gap-1">' +
+          '<span class="text-xs font-bold text-base-200 hover:text-amber-500 transition-colors">' + t.title + '</span>' +
+          '<span class="text-[10px] text-base-500 font-medium">' + t.project + '</span>' +
+        '</div>' +
+      '</td>' +
+      '<td class="px-3 py-3 max-w-[200px] truncate text-xs text-base-400" title="' + (t.desc || '') + '">' + (t.desc || '—') + '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' +
+        '<div class="flex items-center gap-2">' +
+          userAvatarHtml(t.assignee, 'w-6 h-6', 'text-[9px]', 'shrink-0') +
+          '<span class="text-xs text-base-300 font-medium">' + uName + '</span>' +
+        '</div>' +
+      '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' + assignedByHtml + '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' + priorityPill + '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' +
+        '<span class="text-[10px] font-bold propercase tracking-wider px-2.5 py-1 rounded-full ' + getStatusClass(t.status) + '">' + t.status + '</span>' +
+      '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' + progressHtml + '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' +
+        '<div class="flex flex-col gap-1">' +
+          '<span class="text-xs font-semibold text-base-300">' + formatDate(t.deadline) + '</span>' +
+          '<span>' + deadlineHtml + '</span>' +
+        '</div>' +
+      '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap text-xs text-base-300 font-medium">' + (t.created ? formatDate(t.created) : '—') + '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap">' + commentsBadgeHtml + '</td>' +
+      '<td class="px-3 py-3 whitespace-nowrap text-center" onclick="event.stopPropagation()">' + actionButtonsHtml + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var tableHtml = 
+    '<div class="bg-base-900 border border-base-800 rounded-2xl overflow-hidden shadow-xl fade-up">' +
+      '<div class="overflow-x-auto overflow-y-auto max-h-[calc(100vh-220px)] relative">' +
+        '<table class="min-w-[1400px] w-full border-collapse text-left">' +
+          '<thead class="sticky-thead">' +
+            '<tr class="border-b border-base-800 bg-base-900/60 text-[10px] text-base-400 font-700 propercase tracking-wider">' +
+              renderSortHeader('id', 'ID') +
+              renderSortHeader('title', 'Title & Project') +
+              renderSortHeader('desc', 'Description') +
+              renderSortHeader('assignee', 'Assignee') +
+              renderSortHeader('assignedBy', 'Assigned By') +
+              renderSortHeader('priority', 'Priority') +
+              renderSortHeader('status', 'Status') +
+              renderSortHeader('progress', 'Progress') +
+              renderSortHeader('deadline', 'Deadline') +
+              renderSortHeader('created', 'Created') +
+              renderSortHeader('comments', 'Comments') +
+              '<th class="px-3 py-3 text-center text-base-400">Actions</th>' +
+            '</tr>' +
+          '</thead>' +
+          '<tbody class="divide-y divide-base-800/40 bg-base-900/20">' + 
+            (filtered.length ? tableRows : '<tr><td colspan="12" class="text-center text-base-500 py-12">No tasks match</td></tr>') + 
+          '</tbody>' +
+        '</table>' +
+      '</div>' +
+    '</div>';
+
+  var resetButton = (filterStatus!=='All' || filterPriority!=='All' || filterProject!=='All' || searchQuery || filterScope!=='Team') ? '<button onclick="resetTaskFilters()" class="px-3 py-1.5 rounded-lg text-xs bg-base-800 border border-base-700 text-base-400 hover:bg-base-900 transition-colors">Reset</button>' : '';
+  var tasksViewTitle = (isMD() || isManager()) ? 'All Tasks' : 'My Tasks';
+  var canCreateTask = isMD() || isSuperAdmin() || isAdmin() || (isNamedManagerRole() && appSettings.allowNewTaskToManagers === 'true') || (isRegularUser() && appSettings.allowNewTaskToUsers === 'true');
+  var newTaskBtnHtml = canCreateTask ? '<button onclick="openTaskModal()" class="flex items-center gap-2 px-4 py-2 rounded-lg bg-sky-500 hover:bg-sky-400 text-base-950 font-600 text-sm transition-colors shadow-lg shadow-sky-500/20"><i class="fas fa-plus text-xs"></i> New Task</button>' : '';
+  return '<div class="flex justify-between items-center mb-4">' +
+           '<h2 class="text-xl font-display font-bold text-base-100">' + tasksViewTitle + '</h2>' +
+           newTaskBtnHtml +
+         '</div>' +
+         '<div class="flex gap-3 mb-4 flex-wrap items-center">' +
+           '<select onchange="setFilterStatus(this.value)" class="px-3 py-1.5 rounded-lg text-xs"><option value="All">All Status</option><option value="Pending">Pending</option><option value="In Progress">In Progress</option><option value="Under Review">Under Review</option><option value="Completed">Completed</option><option value="Overdue">Overdue</option></select>' +
+           '<select onchange="filterPriority=this.value;renderView()" class="px-3 py-1.5 rounded-lg text-xs"><option value="All">All Priority</option><option value="High">High</option><option value="Medium">Medium</option><option value="Low">Low</option></select>' +
+           '<select onchange="filterProject=this.value;renderView()" class="px-3 py-1.5 rounded-lg text-xs"><option value="All">All Projects</option>' + PROJECTS_LIST.map(function(p){return '<option value="'+p.name+'">'+p.name+'</option>';}).join('') + '</select>' +
+           resetButton +
+         '</div>' + tableHtml +
+         (canCreateTask ? '<button onclick="openTaskModal()" class="fixed bottom-6 right-6 sm:hidden z-50 w-14 h-14 rounded-full bg-sky-500 hover:bg-sky-400 text-base-950 shadow-2xl shadow-sky-500/30 flex items-center justify-center transition-all active:scale-90"><i class="fas fa-plus text-xl"></i></button>' : '');
+}
+
+function renderKanbanView(){
+  var vis=getFilteredVisibleTasks();
+  var cols=[
+    {key:'Pending',label:'Pending',icon:'fa-clock',color:'text-amber-400'},
+    {key:'In Progress',label:'In Progress',icon:'fa-spinner fa-spin-slow',color:'text-blue-400'},
+    {key:'Under Review',label:'Under Review',icon:'fa-eye',color:'text-purple-400'},
+    {key:'Overdue',label:'Overdue',icon:'fa-triangle-exclamation',color:'text-red-400'},
+    {key:'Completed',label:'Completed',icon:'fa-check-circle',color:'text-emerald-400'}
+  ];
+  
+  return '<div class="flex gap-5 overflow-x-auto pb-4 snap-x snap-mandatory">'+cols.map(function(col){
+    var colTasks = vis.filter(function(t){return t.status===col.key;});
+    return '<div class="min-w-[280px] flex-shrink-0 rounded-2xl bg-base-900/30 border border-base-800/80 p-4 min-h-[500px] flex flex-col snap-start">' +
+             '<div class="flex gap-2.5 items-center pb-3 border-b border-base-800 mb-3">' +
+               '<i class="fas '+col.icon+' text-xs '+col.color+'"></i>' +
+               '<span class="font-display text-xs font-bold propercase tracking-wider text-base-400">'+col.label+'</span>' +
+               '<span class="ml-auto text-[10px] font-semibold bg-base-800 text-base-400 px-2 py-0.5 rounded-full border border-base-800">'+colTasks.length+'</span>' +
+             '</div>' +
+             '<div class="space-y-3 flex-1 overflow-y-auto pr-1">' +
+               (colTasks.length ? colTasks.map(function(t){
+                 var priorityPill = '';
+                 if (t.priority === 'High') {
+                   priorityPill = '<span class="px-2 py-0.5 rounded text-[9px] font-bold propercase tracking-wider priority-high">High</span>';
+                 } else if (t.priority === 'Medium') {
+                   priorityPill = '<span class="px-2 py-0.5 rounded text-[9px] font-bold propercase tracking-wider priority-medium">Med</span>';
+                 } else {
+                   priorityPill = '<span class="px-2 py-0.5 rounded text-[9px] font-bold propercase tracking-wider priority-low">Low</span>';
+                 }
+                 
+                 return '<div class="p-3.5 rounded-xl bg-base-900 border border-base-800 hover:border-amber-500/20 card-lift cursor-pointer flex flex-col gap-2" onclick="openDetail('+t.id+')">' +
+                          '<div class="flex justify-between items-center gap-2">' +
+                            '<span class="text-[9px] font-bold text-amber-500/80 propercase tracking-widest truncate max-w-[100px]" title="'+t.project+'">'+t.project+'</span>' +
+                            priorityPill +
+                          '</div>' +
+                          '<p class="text-xs font-semibold leading-normal text-base-900 dark:text-white line-clamp-2">'+t.title+'</p>' +
+                          '<div class="flex items-center justify-between pt-2 border-t border-base-800/40 mt-1">' +
+                            '<span class="text-[9px] text-base-500 flex items-center gap-1 font-medium"><i class="far fa-calendar text-[9px]"></i> '+formatDate(t.deadline)+'</span>' +
+                            userAvatarHtml(t.assignee, 'w-6 h-6', 'text-[8px]', 'ring-2 ring-base-900 shadow-sm') +
+                          '</div>' +
+                        '</div>';
+               }).join('') : '<p class="text-center text-base-500 text-[11px] py-8 italic bg-base-900/10 rounded-xl border border-dashed border-base-800/60">No tasks</p>') +
+             '</div>' +
+           '</div>';
+  }).join('')+'</div>';
+}
+
+function renderCalendarView(){
+  var taskMap = buildMonthTaskMap(calendarYear, calendarMonth);
+  var daysInMonth = getDaysInMonth(calendarYear, calendarMonth);
+  var startWeekday = new Date(calendarYear, calendarMonth, 1).getDay();
+  var monthTasks = getCalendarTasks();
+  var today = new Date();
+
+  var html = '<div class="space-y-3">';
+
+  // ── Header ──────────────────────────────────────────────────
+  html += '<div style="background:var(--card);border:1px solid var(--border-strong);border-radius:16px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
+    '<div style="display:flex;align-items:center;gap:14px;">' +
+      '<div style="background:var(--accent-subtle);border:1px solid var(--accent-glow);border-radius:12px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;">' +
+        '<i class="fas fa-calendar-alt" style="color:var(--accent);font-size:16px;"></i>' +
+      '</div>' +
+      '<div>' +
+        '<p style="font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg-subtle);margin:0 0 1px;">Schedule</p>' +
+        '<h3 style="font-size:18px;font-weight:700;color:var(--fg);margin:0;letter-spacing:-.01em;">' + getMonthName(calendarMonth) + ' <span style="font-weight:400;color:var(--fg-muted);">' + calendarYear + '</span></h3>' +
+      '</div>' +
+    '</div>' +
+    '<div style="display:flex;align-items:center;gap:6px;">' +
+      '<button onclick="setCalendarMode(\'Month\')" style="padding:6px 14px;border-radius:10px;font-size:11px;font-weight:600;border:1px solid ' + (calendarMode==='Month' ? 'var(--accent)' : 'var(--border-strong)') + ';background:' + (calendarMode==='Month' ? 'var(--accent)' : 'var(--card-alt)') + ';color:' + (calendarMode==='Month' ? '#060e17' : 'var(--fg-muted)') + ';cursor:pointer;transition:all .2s;">Month</button>' +
+      '<button onclick="setCalendarMode(\'Timeline\')" style="padding:6px 14px;border-radius:10px;font-size:11px;font-weight:600;border:1px solid ' + (calendarMode==='Timeline' ? 'var(--accent)' : 'var(--border-strong)') + ';background:' + (calendarMode==='Timeline' ? 'var(--accent)' : 'var(--card-alt)') + ';color:' + (calendarMode==='Timeline' ? '#060e17' : 'var(--fg-muted)') + ';cursor:pointer;transition:all .2s;">Timeline</button>' +
+      '<div style="width:1px;height:22px;background:var(--border-strong);margin:0 4px;"></div>' +
+      '<button onclick="changeCalendarMonth(-1)" style="width:34px;height:34px;border-radius:10px;border:1px solid var(--border-strong);background:var(--card-alt);color:var(--fg-muted);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all .2s;" onmouseover="this.style.background=\'var(--accent-subtle)\';this.style.color=\'var(--accent)\';this.style.borderColor=\'var(--accent-glow)\'" onmouseout="this.style.background=\'var(--card-alt)\';this.style.color=\'var(--fg-muted)\';this.style.borderColor=\'var(--border-strong)\'">‹</button>' +
+      '<button onclick="changeCalendarMonth(1)"  style="width:34px;height:34px;border-radius:10px;border:1px solid var(--border-strong);background:var(--card-alt);color:var(--fg-muted);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all .2s;" onmouseover="this.style.background=\'var(--accent-subtle)\';this.style.color=\'var(--accent)\';this.style.borderColor=\'var(--accent-glow)\'" onmouseout="this.style.background=\'var(--card-alt)\';this.style.color=\'var(--fg-muted)\';this.style.borderColor=\'var(--border-strong)\'">›</button>' +
+    '</div>' +
+  '</div>';
+
+  if (calendarMode === 'Month') {
+    // ── Month grid ───────────────────────────────────────────
+    html += '<div style="background:var(--card);border:1px solid var(--border-strong);border-radius:16px;padding:16px 18px;overflow:hidden;">';
+
+    // Day-of-week headers
+    var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin-bottom:10px;">';
+    days.forEach(function(d,i){
+      var isW = i === 0 || i === 6;
+      html += '<div style="text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:' + (isW ? 'var(--fg-subtle)' : 'var(--fg)') + ';opacity:' + (isW ? '.5' : '.7') + ';padding:5px 0;">' + d + '</div>';
+    });
+    html += '</div>';
+
+    // Day cells
+    html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:5px;">';
+
+    for(var b = 0; b < startWeekday; b++){
+      html += '<div style="border-radius:12px;background:var(--bg-alt);opacity:.3;"></div>';
+    }
+
+    for(var day = 1; day <= daysInMonth; day++){
+      var cellTasks = taskMap[day] || [];
+      var isToday = today.getFullYear()===calendarYear && today.getMonth()===calendarMonth && today.getDate()===day;
+      var isWeekend = (new Date(calendarYear,calendarMonth,day).getDay()%6===0);
+
+      var cellBg = isToday ? 'linear-gradient(135deg, var(--accent-subtle), var(--card))' : (isWeekend ? 'var(--bg-alt)' : 'var(--card-alt)');
+      var cellBrd = isToday ? 'var(--accent)' : 'var(--border)';
+      var numColor = isToday ? 'var(--accent)' : (isWeekend ? 'var(--fg-subtle)' : 'var(--fg)');
+
+      html += '<div style="min-height:82px;border-radius:12px;border:1px solid ' + cellBrd + ';background:' + cellBg + ';padding:8px 9px;display:flex;flex-direction:column;' + (cellTasks.length === 0 ? 'align-items:center;justify-content:center;' : '') + 'cursor:default;transition:all .18s;position:relative;overflow:hidden;" ' +
+              'onmouseover="this.style.borderColor=\'var(--accent-glow)\';this.style.boxShadow=\'0 0 0 1px var(--accent-glow)\';' + (isToday ? '' : 'this.style.borderColor=\'var(--accent-glow)\'') + '" onmouseout="this.style.borderColor=\'' + cellBrd + '\';this.style.boxShadow=\'none\'">' +
+        (isToday ? '<div style="position:absolute;top:0;right:0;width:36px;height:36px;border-radius:0 12px 0 24px;background:var(--accent);opacity:.12;"></div>' : '') +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:4px;' + (cellTasks.length === 0 ? 'margin:0;' : 'margin-bottom:6px;') + '">' +
+          '<span style="font-size:13px;font-weight:' + (isToday ? '800' : '600') + ';color:' + numColor + ';line-height:1;">' + day + '</span>' +
+          (isToday ? '<span style="font-size:7px;background:var(--accent);color:#060e17;border-radius:5px;padding:2px 6px;font-weight:700;line-height:1.4;letter-spacing:.04em;">TODAY</span>' : '') +
+        '</div>';
+
+      // Task pills
+      if (cellTasks.length > 0) {
+        html += '<div style="flex:1;overflow:hidden;display:flex;flex-direction:column;gap:3px;">';
+        var dotColors = {'High':'#f87171','Medium':'#fbbf24','Low':'#34d399','Completed':'#34d399','Overdue':'#f87171'};
+        var cellLimit = cellTasks.length > 2 ? 1 : 2;
+        cellTasks.slice(0, cellLimit).forEach(function(t){
+          var dot = dotColors[t.priority] || '#8aa5c0';
+          var statusBg = t.status === 'Overdue' ? 'rgba(248,113,113,0.1)' : 'var(--bg-alt)';
+          var statusDot = t.status === 'Overdue' ? '#f87171' : dot;
+          html += '<div onclick="openDetail(' + t.id + ')" style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:3px 5px;border-radius:6px;background:' + statusBg + ';transition:all .15s;" onmouseover="this.style.background=\'var(--accent-subtle)\'" onmouseout="this.style.background=\'' + statusBg + '\'">' +
+            '<div style="width:5px;height:5px;border-radius:50%;background:' + statusDot + ';flex-shrink:0;' + (t.status === 'Overdue' ? 'animation:blink 1.2s infinite;' : '') + '"></div>' +
+            '<span style="font-size:9px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3;font-weight:500;">' + t.title + '</span>' +
+          '</div>';
+        });
+        if (cellTasks.length > 2) {
+          html += '<div style="display:flex;align-items:center;gap:5px;padding:1px 5px;">' +
+            '<span style="font-size:8px;color:var(--accent);font-weight:700;">+' + (cellTasks.length-1) + ' more</span>' +
+          '</div>';
+        }
+        html += '</div>';
+      }
+
+      html += '</div>';
+    }
+    html += '</div></div>'; // close grid + card
+
+  } else {
+    // ── Timeline ─────────────────────────────────────────────
+    html += '<div style="background:var(--card);border:1px solid var(--border-strong);border-radius:16px;padding:16px 18px;">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">' +
+      '<p style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.1em;margin:0;font-weight:600;">Deadline Positions</p>' +
+      '<span style="font-size:10px;color:var(--fg-muted);">' + getMonthName(calendarMonth) + ' ' + calendarYear + '</span>' +
+    '</div>';
+
+    // Day ruler
+    html += '<div style="display:flex;align-items:center;margin-bottom:14px;padding-left:158px;position:relative;">';
+    html += '<div style="position:absolute;left:158px;right:0;bottom:-4px;height:1px;background:var(--border);"></div>';
+    var rulerStep = Math.max(1, Math.floor(daysInMonth / 7));
+    for(var rd = 1; rd <= daysInMonth; rd += rulerStep){
+      var isRulerToday = today.getFullYear()===calendarYear && today.getMonth()===calendarMonth && today.getDate()===rd;
+      html += '<div style="flex:1;text-align:left;position:relative;">' +
+        '<span style="font-size:9px;font-weight:' + (isRulerToday ? '700' : '500') + ';color:' + (isRulerToday ? 'var(--accent)' : 'var(--fg-subtle)') + ';">' + rd + '</span>' +
+        (isRulerToday ? '<div style="position:absolute;bottom:-17px;left:0;width:100%;height:2px;background:var(--accent);border-radius:2px;opacity:.7;"></div>' : '') +
+      '</div>';
+    }
+    html += '</div>';
+
+    if (monthTasks.length === 0) {
+      html += '<div style="text-align:center;padding:32px 0;">' +
+        '<div style="width:48px;height:48px;border-radius:50%;background:var(--bg-alt);display:flex;align-items:center;justify-content:center;margin:0 auto 10px;"><i class="fas fa-calendar-check" style="color:var(--fg-subtle);font-size:16px;"></i></div>' +
+        '<p style="font-size:13px;color:var(--fg-subtle);margin:0;font-weight:500;">No tasks with deadlines this month</p>' +
+        '<p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0;">Tasks will appear here once they have a deadline set.</p>' +
+      '</div>';
+    } else {
+      var pBars = {
+        'High':      {bg:'rgba(248,113,113,0.15)', bar:'#f87171'},
+        'Medium':    {bg:'rgba(251,191,36,0.12)',  bar:'#fbbf24'},
+        'Low':       {bg:'rgba(52,211,153,0.12)',  bar:'#34d399'},
+      };
+      var sBadge = {
+        'Completed':  {bg:'rgba(52,211,153,0.12)',  fg:'#34d399'},
+        'In Progress':{bg:'rgba(96,165,250,0.12)',  fg:'#60a5fa'},
+        'Pending':    {bg:'rgba(138,165,192,0.1)',  fg:'#8aa5c0'},
+        'Overdue':    {bg:'rgba(248,113,113,0.12)', fg:'#f87171'},
+      };
+
+      monthTasks.forEach(function(task, idx){
+        var dd = new Date(task.deadline);
+        var dayIdx = dd.getDate() - 1;
+        var pct = (dayIdx / daysInMonth) * 100;
+        var barW = Math.max(100/daysInMonth * 1.8, 3);
+        var pc = pBars[task.priority] || pBars['Medium'];
+        var sc = sBadge[task.status]  || sBadge['Pending'];
+        var uName = getUserDisplayName(task.assignee);
+
+        html += '<div style="display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:12px;margin-bottom:5px;background:var(--card-alt);border:1px solid var(--border);transition:all .18s;cursor:pointer;" onclick="openDetail(' + task.id + ')" onmouseover="this.style.borderColor=\'var(--accent-glow)\';this.style.background=\'var(--bg)\'" onmouseout="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--card-alt)\'">' +
+          '<div style="width:150px;flex-shrink:0;">' +
+            '<p style="font-size:12px;font-weight:600;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0;line-height:1.3;">' + task.title + '</p>' +
+            '<p style="font-size:9px;color:var(--fg-subtle);margin:2px 0 0;"><i class="fas fa-user" style="font-size:7px;margin-right:3px;opacity:.6;"></i>' + uName + ' · ' + formatDate(task.deadline) + '</p>' +
+          '</div>' +
+          '<div style="flex:1;height:6px;border-radius:6px;background:var(--bg-alt);position:relative;overflow:hidden;box-shadow:inset 0 1px 2px rgba(0,0,0,.1);">' +
+            '<div style="position:absolute;left:' + pct + '%;top:0;height:100%;width:' + barW + '%;background:linear-gradient(135deg,' + pc.bar + ',' + pc.bar + 'cc);border-radius:6px;box-shadow:0 0 8px ' + pc.bar + '50;"></div>' +
+            '<div style="position:absolute;left:' + pct + '%;top:0;height:100%;width:2px;background:' + pc.bar + ';border-radius:2px;box-shadow:0 0 8px ' + pc.bar + ';"></div>' +
+          '</div>' +
+          '<span style="font-size:9px;padding:2px 8px;border-radius:20px;font-weight:600;background:' + sc.bg + ';color:' + sc.fg + ';white-space:nowrap;">' + task.status + '</span>' +
+          '<div style="width:5px;height:5px;border-radius:50%;background:' + pc.bar + ';flex-shrink:0;opacity:.7;"></div>' +
+        '</div>';
+      });
+    }
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+
+
+function renderTeamView(){
+  if(!isMD() && !isManager()) return '<p class="text-center py-16 text-base-500">Access restricted to MD or Managers</p>';
+  var teamUsernames = getMyTeamUsernames();
+  var teamMembers = USERS.filter(function(u) { return teamUsernames.indexOf(u.username) !== -1; });
+  
+  var addBtnHtml = '';
+  if (isMD() || isManager()) {
+    addBtnHtml = '<div class="flex justify-between items-center mb-6">' +
+                   '<h2 class="text-xl font-display font-bold text-base-100">Team Directory</h2>' +
+                   '<button onclick="openAddUserModal()" class="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-base-950 font-600 text-sm transition-colors shadow-lg shadow-amber-500/20"><i class="fas fa-user-plus text-xs"></i> Add User</button>' +
+                 '</div>';
+  } else {
+    addBtnHtml = '<div class="mb-6"><h2 class="text-xl font-display font-bold text-base-100">Team Directory</h2></div>';
+  }
+  
+  var cardsHtml = teamMembers.map(function(m){
+    var mt=tasks.filter(function(t){return t.assignee===m.username;});
+    var active=mt.filter(function(t){return t.status!=='Completed';}).length;
+    
+    var actionsHtml = '';
+    if (canAdminManageUsers()) {
+      actionsHtml = '<div class="absolute top-3 right-3 flex gap-1">' +
+                      '<button onclick="openEditUserModal(\'' + m.username + '\')" class="w-7 h-7 rounded-lg bg-base-800 hover:bg-base-700 text-base-400 hover:text-blue-400 flex items-center justify-center transition-colors" title="Edit User"><i class="fas fa-pen text-xs"></i></button>' +
+                      '<button onclick="openChangePasswordModal(\''+m.username+'\')" class="w-7 h-7 rounded-lg bg-base-800 hover:bg-base-700 text-base-400 hover:text-amber-500 flex items-center justify-center transition-colors" title="Change Password"><i class="fas fa-key text-xs"></i></button>' +
+                      '<button onclick="openDeleteUserModal(\''+m.username+'\')" class="w-7 h-7 rounded-lg bg-base-800 hover:bg-base-700 text-base-400 hover:text-red-500 flex items-center justify-center transition-colors" title="Delete User"><i class="fas fa-trash text-xs"></i></button>' +
+                    '</div>';
+    }
+    
+    return '<div class="relative p-4 rounded-2xl bg-base-900 border border-base-800 card-lift flex flex-col justify-between gap-3">' +
+             actionsHtml +
+             '<div>' +
+               '<div class="flex gap-3 items-center mb-3 pr-14">' +
+                 '<div class="w-16 h-16 rounded-2xl flex items-center justify-center text-lg font-bold text-base-950 shadow-sm shrink-0 overflow-hidden'+(m.photo?'':'')+'" style="background:'+(m.photo?'none':m.color)+'">'+(m.photo?'<img src="'+m.photo+'" class="w-full h-full object-cover">':m.initials)+'</div>' +
+                 '<div class="min-w-0">' +
+                   '<h4 class="font-display font-bold text-sm leading-snug truncate propercase tracking-tight">'+m.name+'</h4>' +
+                   '<p class="text-[10px] text-base-500 font-medium truncate mt-0.5">'+m.role+' • '+m.department+'</p>' +
+                   '<p class="text-[9px] text-amber-500/80 font-semibold truncate mt-1 flex items-center gap-1"><i class="fas fa-project-diagram text-[8px]"></i> '+(m.project || 'Unassigned')+'</p>' +
+                 '</div>' +
+               '</div>' +
+             '</div>' +
+             '<div class="grid grid-cols-2 gap-2 text-center">' +
+               '<div class="p-2 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+                 '<p class="text-base font-bold font-display leading-tight">'+mt.length+'</p>' +
+                 '<p class="text-[9px] text-base-500 font-semibold propercase tracking-wider mt-1">Total</p>' +
+               '</div>' +
+               '<div class="p-2 rounded-xl bg-amber-500/5 border border-amber-500/10">' +
+                 '<p class="text-base font-bold font-display text-amber-500 leading-tight">'+active+'</p>' +
+                 '<p class="text-[9px] text-amber-500/70 font-semibold propercase tracking-wider mt-1">Active</p>' +
+               '</div>' +
+             '</div>' +
+           '</div>';
+  }).join('');
+  
+  return '<div>' + addBtnHtml + '<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">' + cardsHtml + '</div></div>';
+}
+
+function renderProjectsView(){
+  if(!isMD() && !isManager()) return '<p class="text-center py-16 text-base-500">Access restricted to MD or Managers</p>';
+  var visibleTasks = getFilteredVisibleTasks();
+  return '<div class="grid sm:grid-cols-2 gap-5">'+PROJECTS_LIST.map(function(p){
+    var pt=visibleTasks.filter(function(t){return t.project===p.name;});
+    var comp=pt.filter(function(t){return t.status==='Completed';}).length;
+    return '<div class="p-5 rounded-2xl bg-base-900 border border-base-800 card-lift flex flex-col justify-between">' +
+             '<div>' +
+               '<div class="flex justify-between items-start gap-4 mb-2">' +
+                 '<div class="min-w-0">' +
+                   '<h4 class="font-display font-bold text-base leading-snug propercase tracking-tight truncate text-base-200">'+p.name+'</h4>' +
+                   '<p class="text-[11px] text-base-500 font-medium truncate mt-0.5"><i class="fas fa-location-dot text-[9px] mr-1"></i>'+(p.location||'Active Site')+'</p>' +
+                 '</div>' +
+                 '<span class="text-xs font-semibold text-amber-500 shrink-0 font-mono bg-amber-500/5 px-2 py-0.5 rounded border border-amber-500/10">'+p.budget+'</span>' +
+               '</div>' +
+               '<div class="w-full h-1.5 rounded-full bg-base-850 bg-opacity-20 mt-4 overflow-hidden" style="background-color: var(--border);">' +
+                 '<div class="progress-fill h-full rounded-full" style="width:'+p.progress+'%; background-color: var(--accent);"></div>' +
+               '</div>' +
+               '<div class="flex justify-between text-[10px] text-base-500 mt-2 font-medium">' +
+                 '<span>Progress</span>' +
+                 '<span class="font-bold text-base-400">'+p.progress+'%</span>' +
+               '</div>' +
+             '</div>' +
+             '<div class="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-base-800/40 text-center">' +
+               '<div>' +
+                 '<p class="text-sm font-bold text-base-300">'+pt.length+'</p>' +
+                 '<p class="text-[9px] text-base-500 propercase font-semibold mt-0.5">Tasks Assigned</p>' +
+               '</div>' +
+               '<div>' +
+                 '<p class="text-sm font-bold text-emerald-500">'+comp+'</p>' +
+                 '<p class="text-[9px] text-emerald-500/70 propercase font-semibold mt-0.5">Completed</p>' +
+               '</div>' +
+             '</div>' +
+           '</div>';
+  }).join('')+'</div>';
+}
+
+// --- TASK CRUD & DETAILS ---
+function findTaskById(taskId) {
+  if (taskId === undefined || taskId === null || taskId === '') return null;
+  var targetId = String(taskId).trim();
+  return tasks.find(function(x) { return String(x.id).trim() === targetId; });
+}
+
+function openTaskModal(taskId){
+  taskId = taskId || null;
+  var teamUsernames = getMyTeamUsernames();
+
+  if (taskId) {
+    var t = findTaskById(taskId);
+    if (!t) return;
+    var canEdit = isMD() || isSuperAdmin() || isManager() || t.assignee === currentUser.username;
+    if (!canEdit) {
+      showToast('Unauthorized to edit this task', 'error');
+      return;
+    }
+
+    if (isTaskCompleted(t)) {
+      showToast('Completed tasks cannot be edited', 'error');
+      return;
+    }
+
+    if (taskHasAttachments(taskId)) {
+      showToast('Task already has attachments and cannot be edited', 'error');
+      return;
+    }
+
+    if (taskAttachmentsCache[taskId] === undefined) {
+      google.script.run
+        .withSuccessHandler(function(attachments) {
+          taskAttachmentsCache[taskId] = attachments || [];
+          if (taskHasAttachments(taskId)) {
+            showToast('Task already has attachments and cannot be edited', 'error');
+            return;
+          }
+          openTaskModalInternal(taskId);
+        })
+        .withFailureHandler(function(err) {
+          showToast('Unable to verify task attachments: ' + err.message, 'error');
+        })
+        .getTaskAttachments(taskId);
+      return;
+    }
+  }
+
+  openTaskModalInternal(taskId);
+}
+
+function openTaskModalInternal(taskId) {
+  var modal=document.getElementById('taskModal');
+  var teamUsernames = getMyTeamUsernames();
+  document.getElementById('taskForm').reset();
+  document.getElementById('taskProgress').value=0;
+
+  // Disable fields for employees (non-managers/non-MDs) when EDITING tasks
+  var isMgmt = isMD() || isManager();
+  var isEditing = !!taskId;
+  document.getElementById('taskTitle').disabled = isEditing && !isMgmt;
+  document.getElementById('taskDesc').disabled = isEditing && !isMgmt;
+  document.getElementById('taskProject').disabled = isEditing && !isMgmt;
+  document.getElementById('taskAssignee').disabled = isEditing && !isMgmt;
+  document.getElementById('taskPriority').disabled = isEditing && !isMgmt;
+  document.getElementById('taskDeadline').disabled = isEditing && !isMgmt;
+  document.getElementById('taskStatus').disabled = false;
+  document.getElementById('taskProgress').disabled = false;
+
+  // Re-populate project dropdown (in case data refreshed)
+  var projectSelect = document.getElementById('taskProject');
+  projectSelect.innerHTML = '<option value="">Select project</option>';
+  PROJECTS_LIST.forEach(function(p) { projectSelect.innerHTML += '<option value="' + p.name + '">' + p.name + '</option>'; });
+
+  // Re-populate assignee dropdown dynamically based on ALL users from the user's sheet tab
+  var assigneeSelect = document.getElementById('taskAssignee');
+  assigneeSelect.innerHTML = '<option value="">Select person</option>';
+  USERS.forEach(function(u) {
+    assigneeSelect.innerHTML += '<option value="' + u.username + '">' + u.name + ' (' + u.username + ')</option>';
+  });
+
+  if(taskId){
+    var t = findTaskById(taskId);
+    if(t){
+      document.getElementById('modalTitle').textContent='Edit Task';
+      document.getElementById('submitBtnText').textContent='Save Changes';
+      document.getElementById('taskId').value=t.id;
+      document.getElementById('taskTitle').value=t.title;
+      document.getElementById('taskDesc').value=t.desc||'';
+      document.getElementById('taskProject').value=t.project;
+      document.getElementById('taskAssignee').value=t.assignee;
+      var user = USERS.find(function(u) { return u.username === t.assignee; });
+      document.getElementById('taskEmail').value = user ? (user.email || '') : '';
+      if (user && user.manager) {
+        var mgr = USERS.find(function(u) { return u.username === user.manager || u.name === user.manager; });
+        document.getElementById('taskAssignedBy').value = mgr ? mgr.name : user.manager;
+      } else {
+        document.getElementById('taskAssignedBy').value = getUserDisplayName(t.assignedBy) || '';
+      }
+      document.getElementById('taskPriority').value=t.priority;
+      document.getElementById('taskDeadline').value=t.deadline;
+      document.getElementById('taskStatus').value=t.status==='Overdue'?'Pending':t.status;
+      document.getElementById('taskProgress').value=t.progress;
+    }
+  } else {
+    document.getElementById('modalTitle').textContent='Create New Task';
+    document.getElementById('submitBtnText').textContent='Create Task';
+    document.getElementById('taskId').value='';
+    document.getElementById('taskEmail').value='';
+    document.getElementById('taskAssignedBy').value='';
+    var d=new Date(); d.setDate(d.getDate()+7);
+    document.getElementById('taskDeadline').value=d.toISOString().split('T')[0];
+    if(!isMD()) document.getElementById('taskAssignee').value=currentUser.username;
+    updateTaskAssigneeEmail();
+  }
+  modal.classList.remove('hidden'); modal.classList.add('flex');
+}
+function closeTaskModal(){ var m=document.getElementById('taskModal'); m.classList.add('hidden'); m.classList.remove('flex'); }
+
+function updateTaskAssigneeEmail() {
+  var assignee = document.getElementById('taskAssignee').value;
+  var emailField = document.getElementById('taskEmail');
+  var assignedByField = document.getElementById('taskAssignedBy');
+  if (assignee) {
+    var user = USERS.find(function(u) { return u.username === assignee; });
+    emailField.value = user ? (user.email || '') : '';
+    if (user && user.manager) {
+      var mgr = USERS.find(function(u) { return u.username === user.manager || u.name === user.manager; });
+      assignedByField.value = mgr ? mgr.name : user.manager;
+    } else {
+      assignedByField.value = currentUser ? currentUser.name : '';
+    }
+  } else {
+    emailField.value = '';
+    assignedByField.value = '';
+  }
+}
+
+function handleTaskSubmit(e){
+  e.preventDefault();
+  var id=document.getElementById('taskId').value;
+  if (id && taskHasAttachments(parseInt(id))) {
+    showToast('Task has uploaded attachments and cannot be edited', 'error');
+    return;
+  }
+  var data={
+    title:document.getElementById('taskTitle').value.trim(),
+    desc:document.getElementById('taskDesc').value.trim(),
+    project:document.getElementById('taskProject').value,
+    assignee:document.getElementById('taskAssignee').value,
+    email:document.getElementById('taskEmail').value,
+    priority:document.getElementById('taskPriority').value,
+    deadline:document.getElementById('taskDeadline').value,
+    status:document.getElementById('taskStatus').value,
+    progress:parseInt(document.getElementById('taskProgress').value)||0
+  };
+  if(data.status!=='Completed' && daysUntil(data.deadline)<0) data.status='Overdue';
+  if(data.status==='Completed') data.progress=100;
+
+  // Disable submit button
+  var submitBtn = document.getElementById('taskSubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+
+  var selfAssign = currentUser && data.assignee === currentUser.username;
+  var assigneeUser = USERS.find(function(u) { return u.username === data.assignee; });
+  var assignedByVal = selfAssign ? currentUser.username : (currentUser ? currentUser.username : '');
+  if (!selfAssign && assigneeUser && assigneeUser.manager) {
+    var mgr = USERS.find(function(u) { return u.username === assigneeUser.manager || u.name === assigneeUser.manager; });
+    assignedByVal = mgr ? mgr.username : assigneeUser.manager;
+  }
+  var mgrUser = USERS.find(function(u) { return u.username === assignedByVal || u.name === assignedByVal; });
+  var assignedByRoleVal = mgrUser ? mgrUser.role : (currentUser ? currentUser.role : '');
+
+  if(id){
+    // UPDATE existing task
+    var idx=tasks.findIndex(function(t){return t.id===parseInt(id);});
+    var existingComments = (idx !== -1) ? (tasks[idx].comments || []) : [];
+    var taskObj = {
+      id: parseInt(id),
+      ...data,
+      created: tasks[idx].created,
+      comments: existingComments,
+      assignedBy: assignedByVal,
+      assignedByRole: assignedByRoleVal
+    };
+    
+    google.script.run
+      .withSuccessHandler(function(){
+        if (taskObj.assignee === currentUser.username) {
+          addToSeenList(taskObj.id);
+        }
+        tasks[idx] = taskObj;
+        google.script.run.logSessionAction(currentUser.username, 'Update Task', 'Updated task ID: ' + taskObj.id);
+        showToast('Task updated & saved to Sheet');
+        closeTaskModal();
+        checkOverdue(); updateNotifications(); renderView();
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-check mr-1"></i> <span id="submitBtnText">Save Changes</span>';
+      })
+      .withFailureHandler(function(err){
+        showToast('Save failed: ' + err.message, 'error');
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-check mr-1"></i> <span id="submitBtnText">Save Changes</span>';
+      })
+      .saveTaskToSheet(taskObj);
+  } else {
+    // CREATE new task
+    var newId = nextTaskId++;
+    var taskObj = {
+      id: newId,
+      ...data,
+      created: new Date().toISOString().split('T')[0],
+      comments: [],
+      assignedBy: assignedByVal,
+      assignedByRole: assignedByRoleVal
+    };
+    
+    google.script.run
+      .withSuccessHandler(function(){
+        if (taskObj.assignee === currentUser.username) {
+          addToSeenList(taskObj.id);
+        }
+        tasks.push(taskObj);
+        google.script.run.logSessionAction(currentUser.username, 'Create Task', 'Created task ID: ' + taskObj.id);
+        showToast('Task created & saved to Sheet');
+        closeTaskModal();
+        checkOverdue(); updateNotifications(); renderView();
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-check mr-1"></i> <span id="submitBtnText">Create Task</span>';
+      })
+      .withFailureHandler(function(err){
+        nextTaskId--;  // Rollback ID
+        showToast('Save failed: ' + err.message, 'error');
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-check mr-1"></i> <span id="submitBtnText">Create Task</span>';
+      })
+      .saveTaskToSheet(taskObj);
+  }
+}
+
+function openDetail(taskId){
+  var t = findTaskById(taskId);
+  if (!t) return;
+  
+  var teamUsernames = getMyTeamUsernames();
+  var canView = isMD() || isSuperAdmin() || isManager() || teamUsernames.indexOf(t.assignee) !== -1;
+  if (!canView) { showToast('Access denied','error'); return; }
+  
+  var modal=document.getElementById('detailModal');
+  var content=document.getElementById('detailContent');
+  var canEdit = isMD() || isSuperAdmin() || isManager() || t.assignee === currentUser.username;
+  if (taskHasAttachments(taskId)) {
+    updateDetailEditButtonState(taskId);
+  }
+  
+  var isMgmt = isMD() || isManager();
+  var teamMembers = USERS.filter(function(u) { return teamUsernames.indexOf(u.username) !== -1; });
+  if (t.assignee && teamUsernames.indexOf(t.assignee) === -1) {
+    var currentAssigneeObj = USERS.find(function(u) { return u.username === t.assignee; });
+    if (currentAssigneeObj) {
+      teamMembers.unshift(currentAssigneeObj);
+    }
+  }
+
+  var assigneeCard = '';
+  assigneeCard = 
+    '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+      '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Assignee</span>' +
+      '<div class="flex items-center gap-1.5 min-w-0">' +
+        userAvatarHtml(t.assignee, 'w-4 h-4', 'text-[7px]', 'shrink-0') +
+        '<p class="text-xs font-semibold truncate">'+getUserDisplayName(t.assignee)+'</p>' +
+      '</div>' +
+    '</div>';
+
+  var assignedByCard = '';
+  if (t.assignedBy) {
+    assignedByCard = 
+      '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+        '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Assigned By</span>' +
+        '<div class="flex items-center gap-1.5 min-w-0">' +
+          userAvatarHtml(t.assignedBy, 'w-4 h-4', 'text-[7px]', 'shrink-0') +
+          '<p class="text-xs font-semibold truncate">'+getUserDisplayName(t.assignedBy)+'</p>' +
+        '</div>' +
+      '</div>';
+  } else {
+    assignedByCard = 
+      '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+        '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Assigned By</span>' +
+        '<p class="text-xs font-semibold truncate text-base-500">N/A</p>' +
+      '</div>';
+  }
+
+  var emailCard = 
+    '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+      '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Assignee Email</span>' +
+      '<p class="text-xs font-semibold truncate select-all" title="' + (t.email || '') + '">' + (t.email || '—') + '</p>' +
+    '</div>';
+
+  var priorityPill = '';
+  if (t.priority === 'High') {
+    priorityPill = '<span class="px-2 py-0.5 rounded text-[9px] font-bold propercase tracking-wider priority-high inline-flex items-center gap-1"><i class="fas fa-arrow-up text-[8px]"></i> High</span>';
+  } else if (t.priority === 'Medium') {
+    priorityPill = '<span class="px-2 py-0.5 rounded text-[9px] font-bold propercase tracking-wider priority-medium inline-flex items-center gap-1"><i class="fas fa-minus text-[8px]"></i> Med</span>';
+  } else {
+    priorityPill = '<span class="px-2 py-0.5 rounded text-[9px] font-bold propercase tracking-wider priority-low inline-flex items-center gap-1"><i class="fas fa-arrow-down text-[8px]"></i> Low</span>';
+  }
+  var priorityCard = 
+    '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+      '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Priority</span>' +
+      '<p class="text-xs font-semibold truncate">' + priorityPill + '</p>' +
+    '</div>';
+
+  var createdCard = 
+    '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+      '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Created Date</span>' +
+      '<p class="text-xs font-semibold truncate">' + (t.created ? formatDate(t.created) : '—') + '</p>' +
+    '</div>';
+
+  var commentsHtml = (t.comments||[]).map(function(c){
+    var author = "System";
+    var role = "SYSTEM";
+    var text = c;
+    var timestamp = "";
+    var commentAvatar = "system";
+    
+    try {
+      var parsed = JSON.parse(c);
+      if (parsed && parsed.text) {
+        author = parsed.author || "Unknown";
+        role = parsed.role || "USER";
+        text = parsed.text;
+        timestamp = parsed.timestamp || "";
+        commentAvatar = parsed.username || "system";
+      }
+    } catch(e) {
+      var colonIdx = c.indexOf(':');
+      if (colonIdx > 0 && colonIdx < 30) {
+        author = c.substring(0, colonIdx).trim();
+        text = c.substring(colonIdx + 1).trim();
+        commentAvatar = author.toLowerCase().trim();
+        // Look up role from USERS
+        var foundUser = USERS.find(function(u) {
+          return u.name.toLowerCase() === author.toLowerCase() || u.username.toLowerCase() === commentAvatar;
+        });
+        role = foundUser ? foundUser.role : "USER";
+      } else {
+        author = "System";
+        role = "SYSTEM";
+        commentAvatar = "system";
+      }
+    }
+    
+    var normalizedRole = role ? role.toUpperCase() : 'USER';
+    if (normalizedRole === 'PROJECT MANAGER') normalizedRole = 'MANAGER';
+    if (normalizedRole === 'SUPER ADMIN') normalizedRole = 'ADMIN';
+    if (normalizedRole === 'SITE ENGINEER' || normalizedRole === 'STRUCTURAL ENGINEER' || normalizedRole === 'QA ENGINEER' || normalizedRole === 'SITE SUPERVISOR') normalizedRole = 'USER';
+    
+    var roleBadge = normalizedRole ? '<span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold uppercase tracking-wider shrink-0">' + normalizedRole + '</span>' : '';
+    var timeHtml = timestamp ? '<span class="text-[11px] text-slate-500 font-medium ml-auto tracking-normal">' + formatCommentTimestamp(timestamp) + '</span>' : '';
+    
+    return '<div class="flex gap-4 p-4.5 rounded-2xl bg-base-900/30 border border-base-800 hover:bg-white/5 transition-colors fade-up relative">' +
+             userAvatarHtml(commentAvatar, 'w-10 h-10', 'text-xs', 'shrink-0') +
+             '<div class="flex-1 min-w-0">' +
+               '<div class="flex items-center justify-between gap-2 mb-1.5 flex-wrap">' +
+                 '<div class="flex items-center gap-2">' +
+                   '<span class="text-sm font-bold text-amber-500 tracking-tight">' + author + '</span>' +
+                   roleBadge +
+                 '</div>' +
+                 timeHtml +
+               '</div>' +
+               '<p class="text-sm leading-relaxed text-slate-200 whitespace-pre-line">' + text + '</p>' +
+             '</div>' +
+           '</div>';
+  }).join('') || '<p class="text-xs italic text-base-500 text-center py-8">No communication comments posted yet.</p>';
+
+  content.innerHTML=
+    '<div class="flex justify-between items-start gap-4 mb-4 pb-3 border-b border-base-800">' +
+      '<div>' +
+        '<span class="text-[9px] font-bold text-amber-500 propercase tracking-widest block mb-0.5">Task Detail</span>' +
+        '<h3 class="font-display text-lg font-bold leading-snug propercase tracking-tight text-base-100 dark:text-white">'+t.title+'</h3>' +
+      '</div>' +
+      '<button onclick="closeDetail()" class="w-8 h-8 rounded-lg bg-base-850 hover:bg-base-800 flex items-center justify-center shrink-0 border border-base-800 transition-colors">' +
+        '<i class="fas fa-times text-xs text-base-400"></i>' +
+      '</button>' +
+    '</div>' +
+    '<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">' +
+      '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+        '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Project</span>' +
+        '<p class="text-xs font-semibold truncate">'+t.project+'</p>' +
+      '</div>' +
+      assigneeCard +
+      emailCard +
+      assignedByCard +
+      priorityCard +
+      '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+        '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Status</span>' +
+        '<p class="text-xs font-semibold truncate"><span class="px-2 py-0.5 text-[9px] rounded-full '+getStatusClass(t.status)+'">'+t.status+'</span></p>' +
+      '</div>' +
+      '<div class="p-3 rounded-xl bg-base-850 bg-opacity-20 border border-base-800">' +
+        '<span class="text-[9px] text-base-500 font-semibold propercase tracking-wider block mb-1">Deadline</span>' +
+        '<p class="text-xs font-semibold truncate '+(daysUntil(t.deadline)<0?'text-red-400':'')+'">'+formatDate(t.deadline)+'</p>' +
+      '</div>' +
+      createdCard +
+    '</div>' +
+    '<div class="mb-5 p-4 rounded-xl bg-base-850 bg-opacity-10 border border-base-800/80">' +
+      '<div class="flex justify-between items-center text-xs mb-2">' +
+        '<span class="text-base-500 font-medium">Task Progress</span>' +
+        '<span class="font-bold text-base-400">'+t.progress+'%</span>' +
+      '</div>' +
+      '<div class="w-full h-2 bg-base-800 rounded-full overflow-hidden">' +
+        '<div class="progress-fill h-full rounded-full" style="width:'+t.progress+'%; background-color: var(--accent);"></div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mb-5">' +
+      '<h4 class="text-[10px] font-bold propercase tracking-wider text-base-500 mb-1.5">Description</h4>' +
+      '<p class="text-xs text-base-300 bg-base-900 border border-base-800 rounded-xl p-3.5 leading-relaxed whitespace-pre-line">'+(t.desc||'No description provided.')+'</p>' +
+    '</div>' +
+    // COMMENTS SECTION
+    '<div class="mb-5">' +
+      '<h4 class="text-[10px] font-bold propercase tracking-wider text-base-500 mb-2">Comments</h4>' +
+      '<div class="space-y-3.5 max-h-[360px] overflow-y-auto pr-1">'+commentsHtml+'</div>' +
+      (canEdit ? 
+        '<div class="flex gap-2 mt-3">' +
+          '<input id="newComment" type="text" placeholder="Write a comment..." class="flex-1 px-3 py-2 rounded-lg text-xs">' +
+          '<button onclick="addComment('+t.id+')" class="px-4 py-2 bg-amber-500 hover:bg-amber-400 rounded-lg text-xs font-bold text-base-950 transition-colors shrink-0">Post</button>' +
+        '</div>' 
+      : '') +
+    '</div>' +
+    // ATTACHMENTS / PROOF UPLOAD SECTION
+    '<div class="mb-5 p-4 rounded-xl bg-base-850 bg-opacity-10 border border-base-800/60">' +
+      '<div class="flex items-center justify-between mb-3">' +
+        '<p class="text-xs text-base-400 font-bold propercase tracking-wider"><i class="fas fa-camera mr-1"></i> Snapshots (<span id="attachmentsCount">0</span>)</p>' +
+        '<span id="attachCount" class="text-[10px] bg-base-800 text-base-400 border border-base-800 px-2 py-0.5 rounded-full font-medium">loading...</span>' +
+      '</div>' +
+      '<div id="attachmentsList" class="space-y-2.5 mb-3.5"><div class="text-xs text-base-500 text-center py-2"><i class="fas fa-spinner fa-spin mr-1"></i> Loading snapshots...</div></div>' +
+      (canEdit ?
+        '<div id="uploadArea" class="border border-dashed border-base-800 hover:border-amber-500/40 rounded-xl p-5 text-center transition-colors cursor-pointer" onclick="document.getElementById(\'fileInput\').click()" ondragover="event.preventDefault();this.classList.add(\'border-amber-500/30\')" ondragleave="this.classList.remove(\'border-amber-500/30\')" ondrop="handleFileDrop(event,'+t.id+')">' +
+          '<i class="fas fa-cloud-arrow-up text-2xl text-base-500 mb-2"></i>' +
+          '<p class="text-xs text-base-400 font-medium">Drag & drop files here or <span class="text-amber-500 font-semibold">browse files</span></p>' +
+          '<p class="text-[9px] text-base-500 mt-1">Images, PDF, Excel, Word — Max 10MB</p>' +
+          '<input id="fileInput" type="file" class="hidden" multiple accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.ppt,.pptx" onchange="handleFileSelect(event,'+t.id+')">' +
+        '</div>' +
+        '<div id="uploadProgress" class="hidden mt-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">' +
+          '<div class="flex items-center gap-2"><i class="fas fa-spinner fa-spin text-amber-400"></i><span id="uploadStatusText" class="text-xs text-amber-300">Uploading...</span></div>' +
+        '</div>'
+      : '') +
+    '</div>' +
+    (canEdit ?
+      '<div class="flex gap-3 mt-5 pt-4 border-t border-base-800">' +
+        '<button id="detailEditTaskBtn" ' + (isTaskCompleted(t) ? 'disabled title="Completed tasks cannot be edited" class="flex-1 py-2.5 bg-base-800 rounded-xl font-bold text-xs text-base-600 opacity-50 cursor-not-allowed flex items-center justify-center gap-1.5"' : 'onclick="closeDetail();openTaskModal('+t.id+')" class="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 rounded-xl font-bold text-xs text-base-950 transition-colors flex items-center justify-center gap-1.5" title="Edit Task"') + '><i class="fas fa-edit"></i> Edit Task</button>' +
+        ((isMD() || isManager()) ? 
+          (isTaskCompleted(t) ?
+            '<button disabled class="flex-1 px-4 py-2.5 bg-base-800 rounded-xl font-bold text-xs text-base-600 opacity-50 cursor-not-allowed flex items-center justify-center gap-1.5" title="Completed tasks cannot be reassigned"><i class="fas fa-user-plus mr-1"></i> Assign</button>' :
+            '<div class="relative px-4 py-2.5 bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 rounded-xl text-blue-400 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer">' +
+              '<i class="fas fa-user-plus mr-1"></i> Assign' +
+              '<select onchange="quickAssignTask(' + t.id + ', this.value)" class="absolute inset-0 w-full h-full cursor-pointer select-clean" style="opacity: 0 !important;">' +
+                teamMembers.map(function(u) {
+                  return '<option value="' + u.username + '" ' + (u.username === t.assignee ? 'selected' : '') + ' class="bg-base-900 text-base-100">' + u.name + '</option>';
+                }).join('') +
+              '</select>' +
+            '</div>')
+        : '') +
+      '</div>'
+    : '');
+
+  modal.classList.remove('hidden'); modal.classList.add('flex');
+
+  loadAttachments(t.id);
+}
+function closeDetail(){ document.getElementById('detailModal').classList.add('hidden'); document.getElementById('detailModal').classList.remove('flex'); }
+
+function quickAssignTask(taskId, newAssignee) {
+  var t = tasks.find(function(x){return x.id===taskId;});
+  if (!t) return;
+  
+  var prevAssignee = t.assignee;
+  t.assignee = newAssignee;
+  
+  // Optimistically update the avatar color & initials inside the modal
+  var avatar = document.getElementById('quickAssignAvatar');
+  if (avatar) {
+    avatar.style.background = getUserColor(newAssignee);
+    avatar.textContent = getUserInitials(newAssignee);
+  }
+  
+  showToast('Reassigning task...', 'info');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      if (result && result.success) {
+        showToast('Task reassigned successfully!');
+        renderView();
+        updateNotifications();
+      } else {
+        t.assignee = prevAssignee;
+        showToast('Reassignment failed: ' + (result.error || 'Unknown error'), 'error');
+        openDetail(taskId);
+      }
+    })
+    .withFailureHandler(function(err) {
+      t.assignee = prevAssignee;
+      showToast('Reassignment failed: ' + err.message, 'error');
+      openDetail(taskId);
+    })
+    .saveTaskToSheet(t);
+}
+
+// ============================================================
+// FILE UPLOAD FUNCTIONS
+// ============================================================
+
+function getFileIcon(mimeType, fileName) {
+  if (!mimeType) mimeType = '';
+  if (!fileName) fileName = '';
+  if (mimeType.indexOf('image') > -1) return '<i class="fas fa-file-image text-blue-400"></i>';
+  if (mimeType.indexOf('pdf') > -1 || fileName.endsWith('.pdf')) return '<i class="fas fa-file-pdf text-red-400"></i>';
+  if (mimeType.indexOf('sheet') > -1 || mimeType.indexOf('excel') > -1 || fileName.endsWith('.xlsx') || fileName.endsWith('.xls') || fileName.endsWith('.csv')) return '<i class="fas fa-file-excel text-green-400"></i>';
+  if (mimeType.indexOf('word') > -1 || mimeType.indexOf('document') > -1 || fileName.endsWith('.doc') || fileName.endsWith('.docx')) return '<i class="fas fa-file-word text-blue-500"></i>';
+  if (mimeType.indexOf('presentation') > -1 || fileName.endsWith('.ppt') || fileName.endsWith('.pptx')) return '<i class="fas fa-file-powerpoint text-orange-400"></i>';
+  return '<i class="fas fa-file text-base-400"></i>';
+}
+
+function loadAttachments(taskId) {
+  google.script.run
+    .withSuccessHandler(function(attachments) {
+      taskAttachmentsCache[taskId] = attachments || [];
+      updateDetailEditButtonState(taskId);
+      var container = document.getElementById('attachmentsList');
+      var countBadge = document.getElementById('attachCount');
+      if (!container) return;
+      
+      countBadge.textContent = attachments.length + ' file' + (attachments.length !== 1 ? 's' : '');
+      
+      if (attachments.length === 0) {
+        container.innerHTML = '<p class="text-xs text-base-500 text-center py-2 italic">No files uploaded yet</p>';
+        return;
+      }
+      
+      container.innerHTML = attachments.map(function(att) {
+        var isImage = att.fileType && att.fileType.indexOf('image') > -1;
+        var thumbnailHtml = isImage && att.thumbnailUrl ? 
+          '<img src="'+att.thumbnailUrl+'" alt="'+att.fileName+'" class="w-10 h-10 rounded object-cover border border-base-600" onerror="this.style.display=\'none\'">' :
+          '<div class="w-10 h-10 rounded bg-base-700 flex items-center justify-center text-lg">' + getFileIcon(att.fileType, att.fileName) + '</div>';
+        
+        return '<div class="flex items-center gap-3 p-2 rounded-lg bg-base-800/50 border border-base-700 hover:border-base-600 transition-colors">' +
+          thumbnailHtml +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="text-xs font-500 truncate" title="'+att.fileName+'">'+att.fileName+'</p>' +
+            '<p class="text-[10px] text-base-500">'+getUserDisplayName(att.uploadedBy)+' • '+att.uploadedAt+'</p>' +
+          '</div>' +
+          '<div class="flex gap-1">' +
+            '<a href="'+att.fileUrl+'" target="_blank" class="w-7 h-7 rounded bg-base-700 flex items-center justify-center hover:bg-amber-500/20 transition-colors" title="Open file"><i class="fas fa-external-link-alt text-[10px] text-base-300"></i></a>' +
+            (isMD() ? '<button onclick="deleteAttachmentUI(\''+att.attachId+'\','+taskId+')" class="w-7 h-7 rounded bg-base-700 flex items-center justify-center hover:bg-red-500/20 transition-colors" title="Delete"><i class="fas fa-trash text-[10px] text-red-400"></i></button>' : '') +
+          '</div>' +
+        '</div>';
+      }).join('');
+    })
+    .withFailureHandler(function(err) {
+      var container = document.getElementById('attachmentsList');
+      if (container) container.innerHTML = '<p class="text-xs text-red-400 text-center py-2">Failed to load: '+err.message+'</p>';
+    })
+    .getTaskAttachments(taskId);
+}
+
+function handleFileDrop(event, taskId) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('border-amber-500');
+  var files = event.dataTransfer.files;
+  for (var i = 0; i < files.length; i++) {
+    uploadFile(files[i], taskId);
+  }
+}
+
+function handleFileSelect(event, taskId) {
+  var files = event.target.files;
+  for (var i = 0; i < files.length; i++) {
+    uploadFile(files[i], taskId);
+  }
+  event.target.value = ''; // Reset so same file can be selected again
+}
+
+function uploadFile(file, taskId) {
+  // Validate file size (10MB max)
+  if (file.size > 10 * 1024 * 1024) {
+    showToast('File "' + file.name + '" exceeds 10MB limit', 'error');
+    return;
+  }
+
+  // Show upload progress
+  var progressDiv = document.getElementById('uploadProgress');
+  var statusText = document.getElementById('uploadStatusText');
+  if (progressDiv) {
+    progressDiv.classList.remove('hidden');
+    statusText.textContent = 'Uploading "' + file.name + '"...';
+  }
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    // Extract base64 (remove data:...;base64, prefix)
+    var base64 = e.target.result.split(',')[1];
+    
+    var fileData = {
+      taskId: taskId,
+      fileName: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      base64: base64,
+      uploadedBy: currentUser.username
+    };
+
+    google.script.run
+      .withSuccessHandler(function(result) {
+        if (progressDiv) progressDiv.classList.add('hidden');
+        if (result.success) {
+          showToast('File "' + file.name + '" uploaded successfully!');
+          loadAttachments(taskId); // Refresh attachments list
+        } else {
+          showToast('Upload failed: ' + (result.error || 'Unknown error'), 'error');
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (progressDiv) progressDiv.classList.add('hidden');
+        showToast('Upload failed: ' + err.message, 'error');
+      })
+      .uploadFileToTask(fileData);
+  };
+  reader.readAsDataURL(file);
+}
+
+function deleteAttachmentUI(attachId, taskId) {
+  if (!confirm('Delete this attachment?')) return;
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      if (result.success) {
+        showToast('Attachment deleted');
+        loadAttachments(taskId);
+      } else {
+        showToast('Delete failed: ' + (result.error || 'Unknown error'), 'error');
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast('Delete failed: ' + err.message, 'error');
+    })
+    .deleteAttachment(attachId);
+}
+
+function addComment(taskId){
+  var input=document.getElementById('newComment');
+  var text=input.value.trim();
+  if(text){
+    var t=tasks.find(function(x){return x.id===taskId;});
+    if(t){
+      t.comments = t.comments || [];
+      var commentObj = {
+        username: currentUser ? currentUser.username : 'system',
+        author: currentUser ? currentUser.name : 'System',
+        role: currentUser ? currentUser.role : 'System',
+        text: text,
+        timestamp: formatCommentTimestamp(new Date())
+      };
+      t.comments.push(JSON.stringify(commentObj));
+      // Save to sheet
+      google.script.run
+        .withSuccessHandler(function(){
+          showToast('Comment saved to Sheet');
+        })
+        .withFailureHandler(function(err){
+          showToast('Comment save failed: ' + err.message, 'error');
+        })
+        .saveTaskToSheet(t);
+      showToast('Comment added');
+      openDetail(taskId);
+    }
+  }
+}
+
+function deleteTask(id){
+  var t = tasks.find(function(x){return x.id===id;});
+  if(!t) return;
+  var canDelete = isMD();
+  if(canDelete){
+    google.script.run
+      .withSuccessHandler(function(result){
+        if(result.success){
+          tasks=tasks.filter(function(t){return t.id!==id;});
+          showToast('Task deleted from Sheet','error');
+          closeDetail(); renderView(); updateNotifications();
+        } else {
+          showToast('Delete failed: ' + (result.error||'Unknown error'), 'error');
+        }
+      })
+      .withFailureHandler(function(err){
+        showToast('Delete failed: ' + err.message, 'error');
+      })
+      .deleteTaskFromSheet(id);
+  } else {
+    showToast('Unauthorized','error');
+  }
+}
+
+function updateSidebarVisibility() {
+  if (!currentUser) return;
+  var isSuper = isSuperAdmin();
+  var isAdminLevel = !isSuper && isAdmin();
+  var isMgr = isNamedManagerRole();
+
+  function shouldShow(baseKey) {
+    if (isSuper) return true;
+    if (isAdminLevel) {
+      if (baseKey === 'showSettings') return true; // Admins can always see/access Settings!
+      return appSettings[baseKey + 'ToAdmins'] === 'true';
+    }
+    if (isMgr) return appSettings[baseKey + 'ToManagers'] === 'true';
+    return appSettings[baseKey + 'ToUsers'] === 'true';
+  }
+
+  var showLogs = shouldShow('showLogs');
+  document.getElementById('navLogsBtn').classList.toggle('hidden', !showLogs);
+
+  var showAtt = shouldShow('showAttachments');
+  document.getElementById('navAttachmentsBtn').classList.toggle('hidden', !showAtt);
+
+  var showSettings = shouldShow('showSettings');
+  document.getElementById('navSettingsBtn').classList.toggle('hidden', !showSettings);
+
+  // Team visibility
+  var showTeam = shouldShow('showTeam');
+  var teamBtn = document.getElementById('navTeamBtn');
+  if (teamBtn) {
+    teamBtn.classList.toggle('hidden', !showTeam);
+  }
+
+  var showProjects = shouldShow('showProjects');
+  var projectsBtn = document.getElementById('navProjectsBtn');
+  if (projectsBtn) {
+    projectsBtn.classList.toggle('hidden', !showProjects);
+  }
+
+  // Reports visibility for Admin, Manager, MD, and Super Admin
+  var showReports = isAdmin() || isNamedManagerRole();
+  var reportsBtn = document.getElementById('navReportsBtn');
+  if (reportsBtn) {
+    reportsBtn.classList.toggle('hidden', !showReports);
+  }
+}
+
+let sidebarCollapsed = false;
+let sidebarHidden = false;
+let sidebarMobileOpen = false;
+
+function toggleSidebar() {
+  if (window.innerWidth <= 1023) {
+    toggleMobileSidebar();
+  } else {
+    toggleDesktopSidebar();
+  }
+}
+
+function toggleDesktopSidebar() {
+  sidebarHidden = !sidebarHidden;
+  var sidebar = document.getElementById('sidebar');
+  var icon = document.getElementById('sidebarToggleIcon');
+  var reopenBtn = document.getElementById('sidebarReopenBtn');
+  sidebar.classList.toggle('desktop-hidden', sidebarHidden);
+  document.body.classList.toggle('sidebar-hidden', sidebarHidden);
+  if (icon) {
+    icon.className = 'fas fa-bars text-sm text-base-400';
+  }
+}
+
+function toggleMobileSidebar() {
+  sidebarMobileOpen = !sidebarMobileOpen;
+  var sidebar = document.getElementById('sidebar');
+  var backdrop = document.getElementById('sidebarBackdrop');
+  sidebar.classList.toggle('mobile-open', sidebarMobileOpen);
+  backdrop.classList.toggle('active', sidebarMobileOpen);
+}
+
+function closeMobileSidebar() {
+  if (!sidebarMobileOpen) return;
+  sidebarMobileOpen = false;
+  document.getElementById('sidebar').classList.remove('mobile-open');
+  document.getElementById('sidebarBackdrop').classList.remove('active');
+}
+
+function updateSearchPlaceholder() {
+  var input = document.getElementById('globalSearch');
+  if (input) {
+    input.placeholder = window.innerWidth <= 640 ? 'Search' : 'Search tasks, projects, assignees...';
+  }
+}
+window.addEventListener('resize', function() {
+  if (window.innerWidth > 1023) {
+    closeMobileSidebar();
+    document.body.classList.remove('sidebar-hidden');
+    var sidebar = document.getElementById('sidebar');
+    if (sidebar) sidebar.classList.remove('desktop-hidden');
+  }
+  updateSearchPlaceholder();
+});
+
+function renderLogsView() {
+  var area = document.getElementById('contentArea');
+  area.innerHTML = '<div class="flex items-center justify-center py-12"><i class="fas fa-spinner fa-spin text-2xl text-amber-500 mr-2"></i> Loading activity logs...</div>';
+  
+  google.script.run
+    .withSuccessHandler(function(logs) {
+      if (logs.length === 0) {
+        area.innerHTML = '<div class="text-center py-16 bg-base-900 border border-base-800 rounded-2xl p-8">' +
+          '<i class="fas fa-history text-4xl text-base-600 mb-3 block"></i>' +
+          '<p class="text-base-400 text-sm">No activity logs found.</p>' +
+          '</div>';
+        return;
+      }
+      
+      // Sort logs by timestamp descending
+      logs.sort(function(a, b) { return new Date(b.timestamp) - new Date(a.timestamp); });
+      
+      var tableRows = logs.map(function(l) {
+        var uName = getUserDisplayName(l.uploadedBy);
+        var dateObj = new Date(l.timestamp);
+        var timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        
+        return '<tr class="border-b border-base-800/40 hover:bg-base-900/40 transition-colors">' +
+          '<td class="px-3 py-3 whitespace-nowrap">' +
+            '<div class="flex flex-col gap-1">' +
+              '<span class="text-xs font-600 text-base-200">' + formatDate(l.timestamp) + '</span>' +
+              '<span class="text-[10px] text-base-500 font-mono">' + timeStr + '</span>' +
+            '</div>' +
+          '</td>' +
+          '<td class="px-3 py-3 whitespace-nowrap">' +
+            '<button onclick="openDetail(' + parseInt(l.taskId) + ')" class="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-500/5 hover:bg-amber-500/10 border border-amber-500/10 text-[10px] font-bold text-amber-500 hover:border-amber-500/20 transition-colors">' +
+              '<i class="fas fa-tasks text-[10px]"></i> #' + l.taskId +
+            '</button>' +
+          '</td>' +
+          '<td class="px-3 py-3 max-w-xs truncate" title="' + l.fileName + '">' +
+            '<div class="flex items-center gap-2">' +
+              '<i class="fas fa-file-arrow-down text-base-500 text-xs shrink-0"></i>' +
+              '<span class="text-xs text-base-300 font-medium truncate">' + l.fileName + '</span>' +
+            '</div>' +
+          '</td>' +
+          '<td class="px-3 py-3 whitespace-nowrap">' +
+            '<div class="flex items-center gap-2">' +
+              userAvatarHtml(l.uploadedBy, 'w-6 h-6', 'text-[9px]', 'shrink-0') +
+              '<span class="text-xs text-base-300 font-medium">' + uName + '</span>' +
+            '</div>' +
+          '</td>' +
+          '<td class="px-3 py-3 whitespace-nowrap text-right">' +
+            '<a href="' + l.fileUrl + '" target="_blank" class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-base-800 hover:bg-base-750 border border-base-700 hover:border-amber-500/30 text-[10px] font-600 text-base-300 transition-colors"><i class="fas fa-external-link-alt text-[10px]"></i> View</a>' +
+          '</td>' +
+        '</tr>';
+      }).join('');
+      
+      area.innerHTML = 
+        '<div class="mb-6 fade-up">' +
+          '<h3 class="font-display text-lg font-700 tracking-wide text-base-200 flex items-center gap-2"><i class="fas fa-history text-amber-500"></i> Activity Audit Logs</h3>' +
+          '<p class="text-xs text-base-500 mt-0.5">Chronological feed of attachments and snapshots updates uploaded by the team.</p>' +
+        '</div>' +
+        '<div class="bg-base-900 border border-base-800 rounded-2xl overflow-hidden shadow-xl fade-up" style="animation-delay: 0.1s">' +
+          '<div class="overflow-x-auto overflow-y-auto max-h-[calc(100vh-240px)] relative">' +
+            '<table class="min-w-[760px] w-full border-collapse text-left">' +
+              '<thead class="sticky-thead">' +
+                '<tr class="border-b border-base-800 bg-base-900/60 text-[10px] text-base-400 font-700 propercase tracking-wider">' +
+                  '<th class="px-3 py-3">Timestamp</th>' +
+                  '<th class="px-3 py-3">Task</th>' +
+                  '<th class="px-3 py-3">File Name</th>' +
+                  '<th class="px-3 py-3">Uploaded By</th>' +
+                  '<th class="px-3 py-3 text-right">Action</th>' +
+                '</tr>' +
+              '</thead>' +
+              '<tbody class="divide-y divide-base-800/40 bg-base-900/20">' + tableRows + '</tbody>' +
+            '</table>' +
+          '</div>' +
+        '</div>';
+    })
+    .withFailureHandler(function(err) {
+      area.innerHTML = '<div class="text-center py-16 bg-base-900 border border-base-800 rounded-2xl p-8">' +
+        '<i class="fas fa-exclamation-triangle text-3xl text-red-500 mb-2"></i>' +
+        '<p class="text-red-400 text-sm">Failed to load activity logs: ' + err.message + '</p>' +
+        '</div>';
+    })
+    .getAllLogs();
+}
+
+function renderAttachmentsView() {
+  var area = document.getElementById('contentArea');
+  area.innerHTML = '<div class="flex items-center justify-center py-12"><i class="fas fa-spinner fa-spin text-2xl text-amber-500 mr-2"></i> Loading snapshots...</div>';
+  
+  google.script.run
+    .withSuccessHandler(function(attachments) {
+      if (attachments.length === 0) {
+        area.innerHTML = '<div class="text-center py-16 bg-base-900 border border-base-800 rounded-2xl p-8">' +
+          '<i class="fas fa-folder-open text-4xl text-base-600 mb-3 block"></i>' +
+          '<p class="text-base-400 text-sm">No snapshots found.</p>' +
+          '</div>';
+        return;
+      }
+      
+      // Sort attachments by uploadedAt descending
+      attachments.sort(function(a, b) { return new Date(b.uploadedAt) - new Date(a.uploadedAt); });
+      
+      var gridItems = attachments.map(function(att) {
+        var isImage = att.fileType && att.fileType.indexOf('image') > -1;
+        var previewHtml = isImage && att.thumbnailUrl ? 
+          '<div class="w-full h-36 overflow-hidden border-b border-base-800 relative group">' +
+            '<img src="' + att.thumbnailUrl + '" alt="' + att.fileName + '" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" onerror="this.src=\'\'">' +
+            '<div class="absolute inset-0 bg-base-950/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">' +
+              '<a href="' + att.fileUrl + '" target="_blank" class="w-9 h-9 rounded-full bg-amber-500 hover:bg-amber-400 text-base-950 flex items-center justify-center transition-colors shadow-lg"><i class="fas fa-eye text-sm"></i></a>' +
+            '</div>' +
+          '</div>' :
+          '<div class="w-full h-36 bg-base-850/40 flex items-center justify-center text-4xl border-b border-base-800 text-base-500 relative group">' +
+            getFileIcon(att.fileType, att.fileName) +
+            '<div class="absolute inset-0 bg-base-950/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">' +
+              '<a href="' + att.fileUrl + '" target="_blank" class="w-9 h-9 rounded-full bg-amber-500 hover:bg-amber-400 text-base-950 flex items-center justify-center transition-colors shadow-lg"><i class="fas fa-download text-sm"></i></a>' +
+            '</div>' +
+          '</div>';
+        
+        var uName = getUserDisplayName(att.uploadedBy);
+        
+        return '<div class="rounded-2xl bg-base-900 border border-base-800 overflow-hidden flex flex-col card-lift">' +
+          previewHtml +
+          '<div class="p-4 flex-1 flex flex-col justify-between min-w-0">' +
+            '<div class="min-w-0 mb-4">' +
+              '<p class="text-xs font-700 truncate text-base-200" title="' + att.fileName + '">' + att.fileName + '</p>' +
+              '<div class="flex items-center gap-2 mt-2.5">' +
+                userAvatarHtml(att.uploadedBy, 'w-5 h-5', 'text-[7px]', 'shrink-0') +
+                '<div class="min-w-0 flex-1">' +
+                  '<p class="text-[10px] text-base-400 font-500 truncate leading-none">'+uName+'</p>' +
+                  '<p class="text-[8px] text-base-500 mt-1 font-mono">'+formatDate(att.uploadedAt)+'</p>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="flex gap-2 pt-2 border-t border-base-800/40">' +
+              '<button onclick="openDetail(' + parseInt(att.taskId) + ')" class="flex-1 py-2 bg-base-800 hover:bg-base-750 border border-base-700 rounded-lg text-[10px] font-600 transition-colors text-base-300">Task Details</button>' +
+              '<a href="' + att.fileUrl + '" target="_blank" class="px-3 py-2 bg-amber-500 hover:bg-amber-400 text-base-950 font-600 rounded-lg text-[10px] flex items-center justify-center transition-colors shadow-sm"><i class="fas fa-external-link-alt"></i></a>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+      
+      area.innerHTML = 
+        '<div class="mb-6 fade-up">' +
+          '<h3 class="font-display text-lg font-700 tracking-wide text-base-200 flex items-center gap-2"><i class="fas fa-camera text-amber-500"></i> Snapshots</h3>' +
+          '<p class="text-xs text-base-500 mt-0.5">Browse and retrieve files uploaded as snapshots across the workspace.</p>' +
+        '</div>' +
+        '<div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5 fade-up" style="animation-delay: 0.1s">' + gridItems + '</div>';
+    })
+    .withFailureHandler(function(err) {
+      area.innerHTML = '<div class="text-center py-16 bg-base-900 border border-base-800 rounded-2xl p-8">' +
+        '<i class="fas fa-exclamation-triangle text-3xl text-red-500 mb-2"></i>' +
+        '<p class="text-red-400 text-sm">Failed to load attachments: ' + err.message + '</p>' +
+        '</div>';
+    })
+    .getAllAttachments();
+}
+
+function renderSettingsView() {
+  var canAccessSettings = isSuperAdmin() || isAdmin() ||
+                          (isNamedManagerRole() && appSettings.showSettingsToManagers === 'true') ||
+                          (isRegularUser() && appSettings.showSettingsToUsers === 'true');
+  if (!canAccessSettings) {
+    document.getElementById('contentArea').innerHTML = '<p class="text-center py-16 text-base-500">Settings access is restricted.</p>';
+    return;
+  }
+  var canEditSettings = isSuperAdmin() || isAdmin();
+  var disabledAttr = canEditSettings ? '' : 'disabled';
+  
+  var logsAdminChecked = appSettings.showLogsToAdmins === 'true' ? 'checked' : '';
+  var attAdminChecked = appSettings.showAttachmentsToAdmins === 'true' ? 'checked' : '';
+  var teamAdminChecked = appSettings.showTeamToAdmins === 'true' ? 'checked' : '';
+  var projAdminChecked = appSettings.showProjectsToAdmins === 'true' ? 'checked' : '';
+  var showSettingsAdminChecked = appSettings.showSettingsToAdmins === 'true' ? 'checked' : '';
+  var logsMgrChecked = appSettings.showLogsToManagers === 'true' ? 'checked' : '';
+  var attMgrChecked = appSettings.showAttachmentsToManagers === 'true' ? 'checked' : '';
+  var teamMgrChecked = appSettings.showTeamToManagers === 'true' ? 'checked' : '';
+  var projMgrChecked = appSettings.showProjectsToManagers === 'true' ? 'checked' : '';
+  var showSettingsMgrChecked = appSettings.showSettingsToManagers === 'true' ? 'checked' : '';
+  var allowNewTaskMgrChecked = appSettings.allowNewTaskToManagers === 'true' ? 'checked' : '';
+  var logsUserChecked = appSettings.showLogsToUsers === 'true' ? 'checked' : '';
+  var attUserChecked = appSettings.showAttachmentsToUsers === 'true' ? 'checked' : '';
+  var teamUserChecked = appSettings.showTeamToUsers === 'true' ? 'checked' : '';
+  var projUserChecked = appSettings.showProjectsToUsers === 'true' ? 'checked' : '';
+  var showSettingsUserChecked = appSettings.showSettingsToUsers === 'true' ? 'checked' : '';
+  var allowNewTaskUserChecked = appSettings.allowNewTaskToUsers === 'true' ? 'checked' : '';
+  
+  function toggleRow(icon, label, desc, id, checked, disabled) {
+    return '<div class="flex items-center justify-between p-4 rounded-xl bg-base-850/40 border border-base-800 hover:border-amber-500/30 hover:shadow-[0_0_20px_rgba(251,191,36,0.06)] transition-all duration-300 group">' +
+      '<div class="flex items-start gap-3 flex-1 pr-4">' +
+        '<div class="mt-0.5 w-8 h-8 rounded-lg bg-base-800/60 border border-base-700/50 flex items-center justify-center shrink-0 group-hover:border-amber-500/30 group-hover:bg-amber-500/5 transition-colors"><i class="fas ' + icon + ' text-amber-400 text-xs"></i></div>' +
+        '<div>' +
+          '<label class="block text-sm font-600 text-base-200">' + label + '</label>' +
+          '<span class="text-xs text-base-500 block leading-relaxed mt-0.5">' + desc + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<label class="switch">' +
+        '<input type="checkbox" id="' + id + '" ' + checked + ' ' + disabled + '>' +
+        '<span class="slider"></span>' +
+      '</label>' +
+    '</div>';
+  }
+  
+  var html = 
+    '<div class="max-w-2xl mx-auto fade-up">' +
+      '<div class="bg-gradient-to-br from-base-900 via-base-900 to-base-850 border border-base-800 rounded-2xl p-7 shadow-xl">' +
+        '<div class="flex items-center gap-4 mb-1">' +
+          '<div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-500/20 to-amber-600/10 border border-amber-500/20 flex items-center justify-center shadow-lg shadow-amber-500/5"><i class="fas fa-sliders text-amber-400 text-sm"></i></div>' +
+          '<div>' +
+            '<h3 class="font-display text-xl font-700 tracking-wide text-base-100">Settings & Control Panel</h3>' +
+            '<p class="text-xs text-base-500">Configure administrative options and feature availability</p>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<form id="settingsForm" onsubmit="handleSettingsSave(event)" class="space-y-5 mt-5">' +
+
+        '<div class="bg-gradient-to-br from-base-900 via-base-900 to-base-850 border border-base-800 rounded-2xl p-6 shadow-xl">' +
+          '<div class="flex items-center gap-3 mb-5 pb-3 border-b border-base-800/60">' +
+            '<div class="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center"><i class="fas fa-user-shield text-amber-400 text-[10px]"></i></div>' +
+            '<h4 class="text-sm font-700 tracking-wide text-base-200 propercase">Admin Permissions</h4>' +
+            '<span class="text-[10px] text-base-600 ml-auto">5 settings</span>' +
+          '</div>' +
+          '<div class="space-y-3">' +
+            toggleRow('fa-shield-halved', 'View Activity Logs', 'Allow Admin users to access the Activity Logs page.', 'toggleShowLogsAdmin', logsAdminChecked, disabledAttr) +
+            toggleRow('fa-camera', 'View Snapshots Gallery', 'Allow Admin users to access the Snapshots page.', 'toggleShowAttAdmin', attAdminChecked, disabledAttr) +
+            toggleRow('fa-users', 'View Team Directory', 'Allow Admin users to access the Team Directory page.', 'toggleShowTeamAdmin', teamAdminChecked, disabledAttr) +
+            toggleRow('fa-diagram-project', 'View Projects Page', 'Allow Admin users to access the Projects page.', 'toggleShowProjAdmin', projAdminChecked, disabledAttr) +
+            toggleRow('fa-sliders', 'Access Settings Page', 'Allow Admin users to open the Settings page.', 'toggleShowSettingsAdmin', showSettingsAdminChecked, disabledAttr) +
+          '</div>' +
+        '</div>' +
+        '<div class="bg-gradient-to-br from-base-900 via-base-900 to-base-850 border border-base-800 rounded-2xl p-6 shadow-xl">' +
+          '<div class="flex items-center gap-3 mb-5 pb-3 border-b border-base-800/60">' +
+            '<div class="w-7 h-7 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center"><i class="fas fa-user-tie text-sky-400 text-[10px]"></i></div>' +
+            '<h4 class="text-sm font-700 tracking-wide text-base-200 propercase">Manager Permissions</h4>' +
+            '<span class="text-[10px] text-base-600 ml-auto">5 settings</span>' +
+          '</div>' +
+          '<div class="space-y-3">' +
+            toggleRow('fa-shield-halved', 'View Activity Logs', 'Let Project Managers check system activity and logs.', 'toggleShowLogsMgr', logsMgrChecked, disabledAttr) +
+            toggleRow('fa-camera', 'View Snapshots Gallery', 'Let Project Managers browse the snapshots gallery.', 'toggleShowAttMgr', attMgrChecked, disabledAttr) +
+            toggleRow('fa-users', 'View Team Directory', 'Let Project Managers view the Team Directory page.', 'toggleShowTeamMgr', teamMgrChecked, disabledAttr) +
+            toggleRow('fa-diagram-project', 'View Projects Page', 'Let Project Managers view the Projects overview page.', 'toggleShowProjMgr', projMgrChecked, disabledAttr) +
+            toggleRow('fa-sliders', 'Access Settings Page', 'Allow Project Managers to open the Settings page.', 'toggleShowSettingsMgr', showSettingsMgrChecked, disabledAttr) +
+            toggleRow('fa-plus', 'Create New Tasks', 'Let Project Managers create new tasks using the +New Task button.', 'toggleAllowNewTaskMgr', allowNewTaskMgrChecked, disabledAttr) +
+          '</div>' +
+        '</div>' +
+
+        '<div class="bg-gradient-to-br from-base-900 via-base-900 to-base-850 border border-base-800 rounded-2xl p-6 shadow-xl">' +
+          '<div class="flex items-center gap-3 mb-5 pb-3 border-b border-base-800/60">' +
+            '<div class="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center"><i class="fas fa-user text-emerald-400 text-[10px]"></i></div>' +
+            '<h4 class="text-sm font-700 tracking-wide text-base-200 propercase">User Permissions</h4>' +
+            '<span class="text-[10px] text-base-600 ml-auto">6 settings</span>' +
+          '</div>' +
+          '<div class="space-y-3">' +
+            toggleRow('fa-shield-halved', 'View Activity Logs', 'Let team members check system upload activities.', 'toggleShowLogsUser', logsUserChecked, disabledAttr) +
+            toggleRow('fa-camera', 'View Snapshots Gallery', 'Let team members browse the snapshots gallery.', 'toggleShowAttUser', attUserChecked, disabledAttr) +
+            toggleRow('fa-users', 'View Team Directory', 'Let team members view the Team Directory page.', 'toggleShowTeamUser', teamUserChecked, disabledAttr) +
+            toggleRow('fa-diagram-project', 'View Projects Page', 'Let team members view the Projects overview page.', 'toggleShowProjUser', projUserChecked, disabledAttr) +
+            toggleRow('fa-sliders', 'Access Settings Page', 'Let team members open the Settings page if enabled.', 'toggleShowSettingsUser', showSettingsUserChecked, disabledAttr) +
+            toggleRow('fa-plus', 'Create New Tasks', 'Let team members create new tasks using the +New Task button.', 'toggleAllowNewTaskUser', allowNewTaskUserChecked, disabledAttr) +
+          '</div>' +
+        '</div>' +
+        (canEditSettings ? '' :
+          '<div class="rounded-2xl bg-base-900 border border-base-800 p-4 text-sm text-base-400">Only Admin and Super Admin can change these permissions.</div>') +
+        '<div class="flex justify-end">' +
+          '<button id="saveSettingsBtn" type="submit" class="inline-flex items-center gap-2 rounded-2xl bg-amber-500 hover:bg-amber-400 text-base-950 px-5 py-3 text-xs font-semibold transition-all duration-200" ' + (canEditSettings ? '' : 'disabled') + '>' +
+            '<i class="fas fa-save"></i> Save Settings' +
+          '</button>' +
+        '</div>' +
+      '</form>' +
+    '</div>';
+    
+  document.getElementById('contentArea').innerHTML = html;
+}
+
+function handleSettingsSave(e) {
+  e.preventDefault();
+  var showLogsAdmin = document.getElementById('toggleShowLogsAdmin').checked ? 'true' : 'false';
+  var showAttAdmin = document.getElementById('toggleShowAttAdmin').checked ? 'true' : 'false';
+  var showTeamAdmin = document.getElementById('toggleShowTeamAdmin').checked ? 'true' : 'false';
+  var showProjAdmin = document.getElementById('toggleShowProjAdmin').checked ? 'true' : 'false';
+  var showSettingsAdmin = document.getElementById('toggleShowSettingsAdmin').checked ? 'true' : 'false';
+  var showLogsMgr = document.getElementById('toggleShowLogsMgr').checked ? 'true' : 'false';
+  var showAttMgr = document.getElementById('toggleShowAttMgr').checked ? 'true' : 'false';
+  var showTeamMgr = document.getElementById('toggleShowTeamMgr').checked ? 'true' : 'false';
+  var showProjMgr = document.getElementById('toggleShowProjMgr').checked ? 'true' : 'false';
+  var showSettingsMgr = document.getElementById('toggleShowSettingsMgr').checked ? 'true' : 'false';
+  var allowNewTaskMgr = document.getElementById('toggleAllowNewTaskMgr').checked ? 'true' : 'false';
+  var showLogsUser = document.getElementById('toggleShowLogsUser').checked ? 'true' : 'false';
+  var showAttUser = document.getElementById('toggleShowAttUser').checked ? 'true' : 'false';
+  var showTeamUser = document.getElementById('toggleShowTeamUser').checked ? 'true' : 'false';
+  var showProjUser = document.getElementById('toggleShowProjUser').checked ? 'true' : 'false';
+  var showSettingsUser = document.getElementById('toggleShowSettingsUser').checked ? 'true' : 'false';
+  var allowNewTaskUser = document.getElementById('toggleAllowNewTaskUser').checked ? 'true' : 'false';
+  
+  var saveBtn = document.getElementById('saveSettingsBtn');
+  saveBtn.disabled = true;
+  saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+  
+  var newSettings = {
+    showLogsToAdmins: showLogsAdmin,
+    showAttachmentsToAdmins: showAttAdmin,
+    showTeamToAdmins: showTeamAdmin,
+    showProjectsToAdmins: showProjAdmin,
+    showSettingsToAdmins: showSettingsAdmin,
+    showLogsToManagers: showLogsMgr,
+    showAttachmentsToManagers: showAttMgr,
+    showTeamToManagers: showTeamMgr,
+    showProjectsToManagers: showProjMgr,
+    showSettingsToManagers: showSettingsMgr,
+    allowNewTaskToManagers: allowNewTaskMgr,
+    showLogsToUsers: showLogsUser,
+    showAttachmentsToUsers: showAttUser,
+    showTeamToUsers: showTeamUser,
+    showProjectsToUsers: showProjUser,
+    showSettingsToUsers: showSettingsUser,
+    allowNewTaskToUsers: allowNewTaskUser,
+  };
+  
+  google.script.run
+    .withSuccessHandler(function(res) {
+      saveBtn.disabled = false;
+      saveBtn.innerHTML = '<i class="fas fa-save mr-1"></i> Save Settings';
+      if (res.success) {
+        appSettings = newSettings;
+        updateSidebarVisibility();
+        showToast('Settings saved successfully!');
+      } else {
+        showToast('Failed to save settings: ' + res.error, 'error');
+      }
+    })
+    .withFailureHandler(function(err) {
+      saveBtn.disabled = false;
+      saveBtn.innerHTML = '<i class="fas fa-save mr-1"></i> Save Settings';
+      showToast('Error saving settings: ' + err.message, 'error');
+    })
+    .saveSettings(newSettings);
+}
+
+function handleDeleteDummyData() {
+  if (appSettings.disableDemoSeed === 'true') {
+    showToast('Demo data cleanup is already applied.', 'info');
+    return;
+  }
+  showConfirmDialog('Remove demo data and prevent future demo seeding? This cannot be undone.', function() {
+    var btn = document.getElementById('deleteDummyBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Removing...';
+
+    google.script.run
+      .withSuccessHandler(function(res) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-trash-alt"></i> Remove Demo Data';
+        if (res.success) {
+          appSettings.disableDemoSeed = 'true';
+          hideConfirmDialog();
+          showToast('Demo data removed and future sample seeding disabled.', 'success');
+          refreshData(false);
+        } else {
+          showToast('Failed to remove demo data: ' + res.error, 'error');
+        }
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-trash-alt"></i> Remove Demo Data';
+        showToast('Error removing demo data: ' + err.message, 'error');
+      })
+      .clearDummyData();
+  });
+}
+
+function showConfirmDialog(message, onConfirm) {
+  var dialog = document.getElementById('confirmDialog');
+  var messageEl = document.getElementById('confirmDialogMessage');
+  dialog.dataset.callback = onConfirm ? 'active' : '';
+  messageEl.textContent = message;
+  dialog.dataset.confirmCallback = onConfirm ? 'true' : '';
+  dialog.__confirmHandler = onConfirm;
+  dialog.classList.remove('hidden');
+  dialog.classList.add('flex');
+}
+
+function hideConfirmDialog() {
+  var dialog = document.getElementById('confirmDialog');
+  dialog.classList.add('hidden');
+  dialog.classList.remove('flex');
+  dialog.__confirmHandler = null;
+}
+
+function confirmDialogConfirmed() {
+  var dialog = document.getElementById('confirmDialog');
+  if (dialog.__confirmHandler) {
+    dialog.__confirmHandler();
+  }
+}
+
+function handleSearch(q){ searchQuery=q; if(currentView==='dashboard') switchView('tasks'); else renderView(); }
+
+// --- MODAL BACKDROP CLOSE & KEYBOARD ---
+document.getElementById('taskModal').addEventListener('click',function(e){if(e.target===this)closeTaskModal();});
+document.getElementById('detailModal').addEventListener('click',function(e){if(e.target===this)closeDetail();});
+document.getElementById('addUserModal').addEventListener('click',function(e){if(e.target===this)closeAddUserModal();});
+document.getElementById('changePasswordModal').addEventListener('click',function(e){if(e.target===this)closeChangePasswordModal();});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeTaskModal();closeDetail();closeAddUserModal();closeChangePasswordModal();document.getElementById('notifPanel').classList.add('hidden');}});
+document.addEventListener('click',function(e){var p=document.getElementById('notifPanel');if(!p.classList.contains('hidden')&&!p.contains(e.target)&&!e.target.closest('[onclick*="toggleNotifications"]'))p.classList.add('hidden');});
+
+// --- USER MANAGEMENT MODALS ---
+function openAddUserModal() {
+  document.getElementById('addUserForm').reset();
+  document.getElementById('addUserPhotoPreview').innerHTML = '<i class="fas fa-camera text-base-500 text-lg"></i>';
+  document.getElementById('addUserModal').classList.remove('hidden');
+  document.getElementById('addUserModal').classList.add('flex');
+}
+function closeAddUserModal() {
+  document.getElementById('addUserModal').classList.add('hidden');
+  document.getElementById('addUserModal').classList.remove('flex');
+}
+function previewAddUserPhoto(e) {
+  var file = e.target.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(ev) {
+    document.getElementById('addUserPhotoPreview').innerHTML = '<img src="' + ev.target.result + '" class="w-full h-full object-cover rounded-full">';
+  };
+  reader.readAsDataURL(file);
+}
+function handleAddUserSubmit(e) {
+  e.preventDefault();
+  var btn = document.getElementById('addUserSubmitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+  
+  var photoInput = document.getElementById('addUserPhotoInput');
+  var photoFile = photoInput.files[0];
+  
+  var userObj = {
+    username: document.getElementById('addUserUsername').value.trim(),
+    password: document.getElementById('addUserPassword').value.trim(),
+    name: document.getElementById('addUserName').value.trim(),
+    email: document.getElementById('addUserEmail').value.trim(),
+    role: document.getElementById('addUserRole').value.trim(),
+    initials: document.getElementById('addUserInitials').value.trim().toUpperCase(),
+    color: document.getElementById('addUserColor').value,
+    department: document.getElementById('addUserDepartment').value.trim(),
+    manager: document.getElementById('addUserManager').value.trim(),
+    project: document.getElementById('addUserProject').value.trim(),
+    mobile: document.getElementById('addUserMobile').value.trim()
+  };
+  
+  if (photoFile) {
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var base64 = ev.target.result.split(',')[1];
+      userObj.photoData = { base64: base64, fileName: photoFile.name, mimeType: photoFile.type };
+      google.script.run
+        .withSuccessHandler(function(res) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-check mr-1"></i> Add User';
+          if (res.success) {
+            showToast('User added successfully!', 'success');
+            google.script.run.logSessionAction(currentUser.username, 'Add User', 'Added user: ' + userObj.username);
+            closeAddUserModal();
+            refreshData(false);
+          } else {
+            showToast(res.error, 'error');
+          }
+        })
+        .withFailureHandler(function(err) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-check mr-1"></i> Add User';
+          showToast(err.message, 'error');
+        })
+        .addUser(userObj);
+    };
+    reader.readAsDataURL(photoFile);
+  } else {
+    google.script.run
+      .withSuccessHandler(function(res) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check mr-1"></i> Add User';
+        if (res.success) {
+          showToast('User added successfully!', 'success');
+          google.script.run.logSessionAction(currentUser.username, 'Add User', 'Added user: ' + userObj.username);
+          closeAddUserModal();
+          refreshData(false);
+        } else {
+          showToast(res.error, 'error');
+        }
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check mr-1"></i> Add User';
+        showToast(err.message, 'error');
+      })
+      .addUser(userObj);
+  }
+}
+
+function openChangePasswordModal(username) {
+  if (!canAdminManageUsers()) {
+    showToast('Only Admin and Super Admin can change passwords', 'error');
+    return;
+  }
+  document.getElementById('changePasswordForm').reset();
+  document.getElementById('changePasswordUsername').value = username;
+  document.getElementById('changePasswordModal').classList.remove('hidden');
+  document.getElementById('changePasswordModal').classList.add('flex');
+}
+function closeChangePasswordModal() {
+  document.getElementById('changePasswordModal').classList.add('hidden');
+  document.getElementById('changePasswordModal').classList.remove('flex');
+}
+function handleChangePasswordSubmit(e) {
+  e.preventDefault();
+  if (!canAdminManageUsers()) {
+    showToast('Only Admin and Super Admin can change passwords', 'error');
+    closeChangePasswordModal();
+    return;
+  }
+  var btn = document.getElementById('changePasswordSubmitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+  
+  var username = document.getElementById('changePasswordUsername').value;
+  var newPassword = document.getElementById('newPasswordInput').value;
+  
+  google.script.run
+    .withSuccessHandler(function(res) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-save mr-1"></i> Save';
+      if (res.success) {
+        showToast('Password changed!', 'success');
+        google.script.run.logSessionAction(currentUser.username, 'Change Password', 'Changed password for user: ' + username);
+        closeChangePasswordModal();
+      } else {
+        showToast(res.error, 'error');
+      }
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-save mr-1"></i> Save';
+      showToast(err.message, 'error');
+    })
+    .changeUserPassword(username, newPassword);
+}
+
+function openDeleteUserModal(username) {
+  if (!canAdminManageUsers()) {
+    showToast('Only Admin and Super Admin can delete users', 'error');
+    return;
+  }
+  document.getElementById('deleteUserUsername').value = username;
+  document.getElementById('deleteUserModal').classList.remove('hidden');
+  document.getElementById('deleteUserModal').classList.add('flex');
+}
+function closeDeleteUserModal() {
+  document.getElementById('deleteUserModal').classList.add('hidden');
+  document.getElementById('deleteUserModal').classList.remove('flex');
+}
+function handleDeleteUserConfirm() {
+  if (!canAdminManageUsers()) {
+    showToast('Only Admin and Super Admin can delete users', 'error');
+    closeDeleteUserModal();
+    return;
+  }
+  var btn = document.getElementById('deleteUserConfirmBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Deleting...';
+  
+  var username = document.getElementById('deleteUserUsername').value;
+  
+  google.script.run
+    .withSuccessHandler(function(res) {
+      btn.disabled = false;
+      btn.innerHTML = 'Delete User';
+      if (res.success) {
+        showToast('User deleted!', 'success');
+        google.script.run.logSessionAction(currentUser.username, 'Delete User', 'Deleted user: ' + username);
+        closeDeleteUserModal();
+        refreshData(false);
+      } else {
+        showToast(res.error, 'error');
+        closeDeleteUserModal();
+      }
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false;
+      btn.innerHTML = 'Delete User';
+      showToast(err.message, 'error');
+      closeDeleteUserModal();
+    })
+    .deleteUser(username);
+}
+
+// --- AUTO-SYNC FROM GOOGLE SHEETS ---
+function autoSync() {
+  if (!isDataLoaded || !currentUser) return;
+  if (document.hidden) return;
+  var now = Date.now();
+  if (now - lastSyncTime >= 15000) {
+    refreshData(true);
+  }
+}
+
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden) {
+    autoSync();
+  }
+});
+window.addEventListener('focus', autoSync);
+
+// Periodic background sync every 60 seconds
+setInterval(function() {
+  if (!document.hidden) {
+    autoSync();
+  }
+}, 60000);
+
+// --- EDIT USER ---
+function openEditUserModal(username) {
+  if (!canAdminManageUsers()) {
+    showToast('Only Admin and Super Admin can edit users', 'error');
+    return;
+  }
+  var user = USERS.find(function(u) { return u.username === username; });
+  if (!user) { showToast('User not found', 'error'); return; }
+  document.getElementById('editUserUsername').value = username;
+  document.getElementById('editUserUsernameDisplay').value = username;
+  document.getElementById('editUserName').value = user.name || '';
+  document.getElementById('editUserEmail').value = user.email || '';
+  document.getElementById('editUserInitials').value = user.initials || '';
+  document.getElementById('editUserColor').value = user.color || '#d97706';
+  document.getElementById('editUserRole').value = user.role || '';
+  document.getElementById('editUserDepartment').value = user.department || '';
+  document.getElementById('editUserManager').value = user.manager || '';
+  document.getElementById('editUserProject').value = user.project || '';
+  document.getElementById('editUserMobile').value = user.mobile || '';
+  var preview = document.getElementById('editUserPhotoPreview');
+  if (user.photo) {
+    preview.innerHTML = '<img src="' + user.photo + '" class="w-full h-full object-cover rounded-full">';
+  } else {
+    preview.innerHTML = '<i class="fas fa-camera text-base-500 text-lg"></i>';
+  }
+  document.getElementById('editUserPhotoInput').value = '';
+  document.getElementById('editUserModal').classList.remove('hidden');
+  document.getElementById('editUserModal').classList.add('flex');
+}
+function closeEditUserModal() {
+  document.getElementById('editUserModal').classList.add('hidden');
+  document.getElementById('editUserModal').classList.remove('flex');
+}
+function previewEditUserPhoto(e) {
+  var file = e.target.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(ev) {
+    document.getElementById('editUserPhotoPreview').innerHTML = '<img src="' + ev.target.result + '" class="w-full h-full object-cover rounded-full">';
+  };
+  reader.readAsDataURL(file);
+}
+function handleEditUserSubmit(e) {
+  e.preventDefault();
+  if (!canAdminManageUsers()) {
+    showToast('Only Admin and Super Admin can update users', 'error');
+    return;
+  }
+  var btn = document.getElementById('editUserSubmitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+  var username = document.getElementById('editUserUsername').value;
+
+  var photoInput = document.getElementById('editUserPhotoInput');
+  var photoFile = photoInput.files[0];
+
+  var payload = {
+    username:   username,
+    name:       document.getElementById('editUserName').value.trim(),
+    email:      document.getElementById('editUserEmail').value.trim(),
+    initials:   document.getElementById('editUserInitials').value.trim().toUpperCase(),
+    color:      document.getElementById('editUserColor').value,
+    role:       document.getElementById('editUserRole').value.trim(),
+    department: document.getElementById('editUserDepartment').value.trim(),
+    manager:    document.getElementById('editUserManager').value.trim(),
+    project:    document.getElementById('editUserProject').value.trim(),
+    photo:      '',
+    mobile:     document.getElementById('editUserMobile').value.trim()
+  };
+
+  if (photoFile) {
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var base64 = ev.target.result.split(',')[1];
+      payload.photoData = { base64: base64, fileName: photoFile.name, mimeType: photoFile.type };
+      google.script.run
+        .withSuccessHandler(function(res) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-check mr-1"></i> Save Changes';
+          if (res.success) {
+            showToast('User updated!', 'success');
+            google.script.run.logSessionAction(currentUser.username, 'Edit User', 'Edited user: ' + username);
+            closeEditUserModal();
+            refreshData(false);
+          } else {
+            showToast(res.error || 'Failed to update user', 'error');
+          }
+        })
+        .withFailureHandler(function(err) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-check mr-1"></i> Save Changes';
+          showToast(err.message, 'error');
+        })
+        .editUser(payload);
+    };
+    reader.readAsDataURL(photoFile);
+  } else {
+    google.script.run
+      .withSuccessHandler(function(res) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check mr-1"></i> Save Changes';
+        if (res.success) {
+          showToast('User updated!', 'success');
+          google.script.run.logSessionAction(currentUser.username, 'Edit User', 'Edited user: ' + username);
+          closeEditUserModal();
+          refreshData(false);
+        } else {
+          showToast(res.error || 'Failed to update user', 'error');
+        }
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check mr-1"></i> Save Changes';
+        showToast(err.message, 'error');
+      })
+      .editUser(payload);
+  }
+}
+
+// ============================================================
+// EXPORT FUNCTIONS
+// ============================================================
+function exportToExcel() {
+  try {
+    // Prepare data for Excel
+    var wsData = [];
+    
+    // Header row
+    wsData.push(['ID', 'Title', 'Description', 'Project', 'Assignee', 'Assigned By', 'Priority', 'Status', 'Progress (%)', 'Deadline', 'Created', 'Comments']);
+    
+    // Helper: flatten task.comments array into a readable string
+    function flattenComments(comments) {
+      if (!comments || !comments.length) return '';
+      return comments.map(function(c) {
+        try {
+          var obj = typeof c === 'string' ? JSON.parse(c) : c;
+          var parts = [];
+          if (obj.author) parts.push(obj.author);
+          if (obj.text)   parts.push(obj.text);
+          if (obj.timestamp) parts.push('[' + obj.timestamp + ']');
+          return parts.join(': ');
+        } catch(e) {
+          return String(c);
+        }
+      }).join(' | ');
+    }
+
+    // Task rows
+    var filteredTasks = getActiveFilteredTasks();
+    if (!filteredTasks || !filteredTasks.length) {
+      showToast('No tasks to export', 'warning');
+      return;
+    }
+
+    filteredTasks.forEach(function(task) {
+      wsData.push([
+        task.id || '',
+        task.title || '',
+        task.desc || '',
+        task.project || '',
+        getUserDisplayName(task.assignee),
+        getUserDisplayName(task.assignedBy),
+        task.priority || '',
+        task.status || '',
+        task.progress !== undefined ? Number(task.progress) : 0,
+        task.deadline || '',
+        task.created || '',
+        flattenComments(task.comments)
+      ]);
+    });
+    
+    // Create workbook and worksheet
+    var ws = XLSX.utils.aoa_to_sheet(wsData);
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Tasks");
+    
+    // Set column widths properly
+    ws['!cols'] = [
+      { wch: 8 },
+      { wch: 25 },
+      { wch: 30 },
+      { wch: 20 },
+      { wch: 15 },
+      { wch: 15 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 40 }
+    ];
+    
+    // Generate timestamp for filename
+    var timestamp = new Date().toISOString().split('T')[0];
+    var wbout = XLSX.write(wb, {bookType:'xlsx',  type: 'binary'});
+    function s2ab(s) {
+      var buf = new ArrayBuffer(s.length);
+      var view = new Uint8Array(buf);
+      for (var i=0; i<s.length; i++) view[i] = s.charCodeAt(i) & 0xFF;
+      return buf;
+    }
+    
+    var blob = new Blob([s2ab(wbout)], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = 'Aarcon_Tasks_' + timestamp + '.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    
+    showToast('Tasks exported to Excel', 'success');
+  } catch(err) {
+    showToast('Export failed: ' + err.message, 'error');
+  }
+}
+
+function exportToPDF() {
+  try {
+    var element = document.createElement('div');
+    element.style.padding = '20px';
+    element.style.fontFamily = 'Arial, sans-serif';
+    element.style.fontSize = '11px';
+    element.style.color = '#000';
+    element.style.backgroundColor = '#fff';
+    
+    // Title
+    var title = document.createElement('h1');
+    title.textContent = 'Aarcon — Tasks Report';
+    title.style.fontSize = '24px';
+    title.style.marginBottom = '10px';
+    title.style.textAlign = 'center';
+    element.appendChild(title);
+    
+    // Timestamp
+    var timestamp = document.createElement('p');
+    timestamp.textContent = 'Generated: ' + new Date().toLocaleString();
+    timestamp.style.fontSize = '10px';
+    timestamp.style.textAlign = 'center';
+    timestamp.style.marginBottom = '20px';
+    timestamp.style.color = '#666';
+    element.appendChild(timestamp);
+    
+    // Create table
+    var table = document.createElement('table');
+    table.style.width = '100%';
+    table.style.borderCollapse = 'collapse';
+    table.style.marginTop = '10px';
+    
+    // Table header
+    var thead = document.createElement('thead');
+    var headerRow = document.createElement('tr');
+    headerRow.style.backgroundColor = '#f0f0f0';
+    headerRow.style.fontWeight = 'bold';
+    
+    var headers = ['ID', 'Title', 'Project', 'Assignee', 'Assigned By', 'Priority', 'Status', 'Progress', 'Deadline', 'Comments'];
+    headers.forEach(function(header) {
+      var th = document.createElement('th');
+      th.textContent = header;
+      th.style.border = '1px solid #ccc';
+      th.style.padding = '8px';
+      th.style.textAlign = 'left';
+      th.style.fontSize = '10px';
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    // Helper: flatten comments to readable string for PDF
+    function flattenCommentsPdf(comments) {
+      if (!comments || !comments.length) return '';
+      return comments.map(function(c) {
+        try {
+          var obj = typeof c === 'string' ? JSON.parse(c) : c;
+          var parts = [];
+          if (obj.author) parts.push(obj.author);
+          if (obj.text)   parts.push(obj.text);
+          if (obj.timestamp) parts.push('[' + obj.timestamp + ']');
+          return parts.join(': ');
+        } catch(e) {
+          return String(c);
+        }
+      }).join(' | ');
+    }
+    
+    // Table body
+    var tbody = document.createElement('tbody');
+    getActiveFilteredTasks().forEach(function(task, idx) {
+      var row = document.createElement('tr');
+      row.style.backgroundColor = idx % 2 === 0 ? '#ffffff' : '#f9f9f9';
+      
+      var cells = [
+        task.id || '',
+        task.title || '',
+        task.project || '',
+        task.assignee || '',
+        task.assignedBy || '',
+        task.priority || '',
+        task.status || '',
+        (task.progress || 0) + '%',
+        task.deadline || '',
+        flattenCommentsPdf(task.comments)
+      ];
+      
+      cells.forEach(function(cell, cellIdx) {
+        var td = document.createElement('td');
+        td.textContent = cell;
+        td.style.border = '1px solid #ccc';
+        td.style.padding = '6px';
+        td.style.fontSize = '9px';
+        // Give comments column extra width and allow wrapping
+        if (cellIdx === cells.length - 1) {
+          td.style.minWidth = '120px';
+          td.style.maxWidth = '200px';
+          td.style.wordBreak = 'break-word';
+          td.style.whiteSpace = 'normal';
+        }
+        row.appendChild(td);
+      });
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    element.appendChild(table);
+    
+    // Generate PDF
+    var timestamp = new Date().toISOString().split('T')[0];
+    var opt = {
+      margin: 10,
+      filename: 'Aarcon_Tasks_' + timestamp + '.pdf',
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2 },
+      jsPDF: { orientation: 'landscape', unit: 'mm', format: 'a4' }
+    };
+    
+    html2pdf().set(opt).from(element).save();
+    showToast('Tasks exported to PDF', 'success');
+  } catch(err) {
+    showToast('PDF export failed: ' + err.message, 'error');
+  }
+}
+
+// ============================================================
+// MD EMPLOYEE REPORTS VIEW
+// ============================================================
+function renderReportsView() {
+  if (!isAdmin() && !isNamedManagerRole()) {
+    return '<p class="text-center py-16 text-base-500">Access restricted to Admin, Manager, MD, or Super Admin</p>';
+  }
+
+  // Filter to team members (for managers) or all users (for admins)
+  var teamUsernames = getMyTeamUsernames();
+  var filteredUsers = USERS.filter(function(u) {
+    return teamUsernames.indexOf(u.username) !== -1;
+  });
+  // Sort by name
+  var sortedUsers = filteredUsers.sort(function(a, b) {
+    return (a.name || '').localeCompare(b.name || '');
+  });
+
+  var selectOptions = sortedUsers.map(function(u) {
+    return '<option value="' + u.username + '">' + u.name + '</option>';
+  }).join('');
+
+  var selectDropdown = 
+    '<div class="flex flex-row items-center justify-between gap-4 mb-8 bg-base-900 border border-base-800 p-5 rounded-2xl">' +
+      '<div class="hidden sm:block">' +
+        '<h3 class="font-display text-base font-bold text-base-100 mb-1">Select Employee</h3>' +
+        '<p class="text-xs text-base-500 whitespace-nowrap">Choose an employee to view their dynamic performance metrics & task summaries</p>' +
+      '</div>' +
+      '<div class="flex-1 sm:flex-none min-w-[150px] sm:min-w-[240px]">' +
+        '<select id="reportEmployeeSelect" onchange="handleReportEmployeeChange(this.value)" class="px-4 py-2.5 rounded-xl text-sm w-full bg-base-950 border border-base-800 text-base-200 focus:border-amber-500/40 transition-colors cursor-pointer">' +
+          '<option value="" disabled selected>Choose an employee...</option>' +
+          selectOptions +
+        '</select>' +
+      '</div>' +
+    '</div>';
+
+  var placeholder = 
+    '<div id="reportDisplayArea" class="flex flex-col items-center justify-center py-20 text-center bg-base-900/30 border border-dashed border-base-800 rounded-3xl">' +
+      '<div class="w-16 h-16 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-500 mb-4">' +
+        '<i class="fas fa-chart-line text-2xl"></i>' +
+      '</div>' +
+      '<h4 class="font-display font-bold text-base text-base-300 mb-1.5">No Employee Selected</h4>' +
+      '<p class="text-xs text-base-500 max-w-[280px]">Select an employee from the dropdown above to generate their detailed tasks and performance report.</p>' +
+    '</div>';
+
+  return '<div class="fade-up" style="animation-delay:0.1s">' +
+           selectDropdown +
+           placeholder +
+         '</div>';
+}
+
+let reportCurrentStatusFilter = 'All';
+let reportCurrentSearchQuery = '';
+
+function handleReportEmployeeChange(username) {
+  reportCurrentStatusFilter = 'All';
+  reportCurrentSearchQuery = '';
+  updateReportDisplay(username);
+}
+
+function updateReportDisplay(username) {
+  var userObj = USERS.find(function(u) { return u.username === username; });
+  if (!userObj) return;
+
+  var userTasks = tasks.filter(function(t) { return t.assignee === username; });
+  var total = userTasks.length;
+  
+  var pending = userTasks.filter(function(t) { return t.status === 'Pending'; }).length;
+  var inProgress = userTasks.filter(function(t) { return t.status === 'In Progress'; }).length;
+  var underReview = userTasks.filter(function(t) { return t.status === 'Under Review'; }).length;
+  var completed = userTasks.filter(function(t) { return t.status === 'Completed'; }).length;
+  var overdue = userTasks.filter(function(t) { return t.status === 'Overdue'; }).length;
+  
+  var active = pending + inProgress + underReview;
+  var completionRate = total ? Math.round((completed / total) * 100) : 0;
+  
+  // Calculate average progress
+  var sumProgress = 0;
+  userTasks.forEach(function(t) {
+    var p = parseInt(t.progress);
+    if (!isNaN(p)) sumProgress += p;
+  });
+  var avgProgress = total ? Math.round(sumProgress / total) : 0;
+
+  var displayArea = document.getElementById('reportDisplayArea');
+  if (!displayArea) return;
+  
+  // Ensure the display area style class is clean
+  displayArea.className = 'fade-up';
+  displayArea.style.animationDelay = '0.1s';
+  displayArea.style.border = 'none';
+  displayArea.style.background = 'none';
+  displayArea.style.padding = '0';
+
+
+  // Employee Profile Card
+  var profileCard = 
+    '<div class="p-6 rounded-2xl bg-base-900 border border-base-800 flex flex-col sm:flex-row gap-4 items-center sm:items-start text-center sm:text-left mb-6 relative overflow-hidden">' +
+      '<div class="w-20 h-20 rounded-2xl flex items-center justify-center text-2xl font-bold text-base-950 shadow-sm shrink-0 overflow-hidden" style="background:' + (userObj.photo ? 'none' : userObj.color) + '">' +
+        (userObj.photo ? '<img src="' + userObj.photo + '" class="w-full h-full object-cover">' : userObj.initials) +
+      '</div>' +
+      '<div class="flex-1 min-w-0">' +
+        '<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">' +
+          '<div>' +
+            '<h2 class="font-display font-bold text-lg leading-snug propercase tracking-tight">' + userObj.name + '</h2>' +
+            '<p class="text-xs text-base-500 font-medium mt-0.5">' + userObj.role + ' &bull; ' + userObj.department + '</p>' +
+          '</div>' +
+          '<div class="flex flex-col items-center sm:items-end text-xs text-base-500 gap-0.5 shrink-0">' +
+            (userObj.email ? '<p class="flex items-center gap-1.5"><i class="fas fa-envelope text-[10px] text-base-500"></i> ' + userObj.email + '</p>' : '') +
+            (userObj.mobile ? '<p class="flex items-center gap-1.5 mt-0.5"><i class="fas fa-phone text-[10px] text-base-500"></i> ' + userObj.mobile + '</p>' : '') +
+          '</div>' +
+        '</div>' +
+        '<div class="flex flex-wrap gap-2.5 mt-3.5 pt-3.5 border-t border-base-800/60 justify-center sm:justify-start">' +
+          '<span class="px-2.5 py-1 text-[10px] font-bold rounded-lg bg-base-950 text-base-400 border border-base-800 flex items-center gap-1"><i class="fas fa-user-tie text-[9px]"></i> Manager: ' + (userObj.manager || 'Rajeev') + '</span>' +
+          '<span class="px-2.5 py-1 text-[10px] font-bold rounded-lg bg-base-950 text-amber-500 border border-base-800 flex items-center gap-1"><i class="fas fa-building text-[9px]"></i> Project: ' + (userObj.project || 'Unassigned') + '</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  // Stat Metrics Grid
+  var metricsGrid = 
+    '<div class="grid grid-cols-3 sm:grid-cols-5 gap-2 sm:gap-4 mb-6">' +
+      statCardSmall('fa-list-check', 'Total Tasks', total) +
+      statCardSmall('fa-bolt', 'Active Tasks', active) +
+      statCardWithRate('fa-circle-check', 'Completed', completed, completionRate + '% Rate') +
+      statCardOverdue('fa-triangle-exclamation', 'Overdue', overdue) +
+      statCardProgress('fa-chart-pie', 'Avg Progress', avgProgress) +
+    '</div>';
+
+  // Task Filter and Table controls
+  var taskListControls = 
+    '<div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4 bg-base-900 border border-base-800 p-4 rounded-xl">' +
+      '<div class="flex flex-wrap gap-1.5">' +
+        renderReportStatusFilterBtn('All', 'All Tasks', total, username) +
+        renderReportStatusFilterBtn('Pending', 'Pending', pending, username) +
+        renderReportStatusFilterBtn('In Progress', 'Active', inProgress, username) +
+        renderReportStatusFilterBtn('Under Review', 'Review', underReview, username) +
+        renderReportStatusFilterBtn('Completed', 'Completed', completed, username) +
+        renderReportStatusFilterBtn('Overdue', 'Overdue', overdue, username) +
+      '</div>' +
+      '<div class="relative min-w-[200px] flex-1 md:max-w-[280px] hidden sm:block">' +
+        '<i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-base-500 text-xs"></i>' +
+        '<input type="text" id="reportTaskSearch" value="' + reportCurrentSearchQuery + '" placeholder="Search this employee\'s tasks..." class="pl-9 pr-4 py-2 rounded-lg text-xs w-full bg-base-950 border border-base-800 text-base-200" oninput="handleReportTaskSearch(this.value, \'' + username + '\')">' +
+      '</div>' +
+    '</div>';
+
+  // Task Table/List
+  var filteredTasks = userTasks.filter(function(t) {
+    // Status Filter
+    if (reportCurrentStatusFilter !== 'All') {
+      if (reportCurrentStatusFilter === 'In Progress' && t.status !== 'In Progress') return false;
+      else if (reportCurrentStatusFilter !== 'In Progress' && t.status !== reportCurrentStatusFilter) return false;
+    }
+    
+    // Search Query
+    if (reportCurrentSearchQuery) {
+      var query = reportCurrentSearchQuery.toLowerCase();
+      var matchTitle = (t.title || '').toLowerCase().indexOf(query) !== -1;
+      var matchDesc = (t.desc || '').toLowerCase().indexOf(query) !== -1;
+      var matchProject = (t.project || '').toLowerCase().indexOf(query) !== -1;
+      if (!matchTitle && !matchDesc && !matchProject) return false;
+    }
+    
+    return true;
+  });
+
+  var tableHtml = '';
+  if (filteredTasks.length === 0) {
+    tableHtml = 
+      '<div class="flex flex-col items-center justify-center py-16 text-center bg-base-900 border border-base-800 rounded-2xl">' +
+        '<div class="w-12 h-12 rounded-full bg-base-800 flex items-center justify-center text-base-500 mb-3">' +
+          '<i class="fas fa-folder-open text-lg"></i>' +
+        '</div>' +
+        '<p class="text-xs text-base-400 font-semibold">No tasks match your selection</p>' +
+        '<p class="text-[10px] text-base-500 mt-1 max-w-[220px]">This employee does not have any tasks that match the active filters or search query.</p>' +
+      '</div>';
+  } else {
+    var rowsHtml = filteredTasks.map(function(t) {
+      var pBarColor = 'var(--accent)';
+      if (t.status === 'Completed') pBarColor = '#10b981';
+      else if (t.status === 'Overdue') pBarColor = '#ef4444';
+      else if (t.status === 'Under Review') pBarColor = '#f59e0b';
+      
+      var priorityHtml = '';
+      if (t.priority === 'High') {
+        priorityHtml = '<span class="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider priority-high">High</span>';
+      } else if (t.priority === 'Medium') {
+        priorityHtml = '<span class="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider priority-medium">Med</span>';
+      } else {
+        priorityHtml = '<span class="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider priority-low">Low</span>';
+      }
+
+      // Build comments for this task
+      var comments = Array.isArray(t.comments) ? t.comments : [];
+      var commentCount = comments.length;
+      var commentToggleBtn = '';
+      var commentDetailRow = '';
+      var commentRowId = 'rpt-cmt-' + t.id;
+
+      if (commentCount > 0) {
+        commentToggleBtn = '<button onclick="toggleReportComments(\''+commentRowId+'\', this, event)" ' +
+          'class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 border border-amber-500/20 text-[10px] font-bold transition-all" ' +
+          'title="Show comments">' +
+          '<i class="fas fa-plus text-[8px]"></i>' +
+          '<span>' + commentCount + '</span>' +
+          '</button>';
+
+        var commentItems = comments.map(function(c, idx) {
+          var author = 'System';
+          var ts = '';
+          var txt = typeof c === 'string' ? c : (c.text || '');
+          if (typeof c === 'string') {
+            try {
+              var parsed = JSON.parse(c);
+              if (parsed && parsed.text) {
+                author = parsed.author || parsed.username || 'Unknown';
+                ts = parsed.timestamp || '';
+                txt = parsed.text;
+              }
+            } catch(e) {
+              var colonIdx = c.indexOf(':');
+              if (colonIdx > 0 && colonIdx < 30) {
+                author = c.substring(0, colonIdx).trim();
+                txt = c.substring(colonIdx + 1).trim();
+              }
+            }
+          } else if (typeof c === 'object' && c !== null) {
+            author = c.author || c.username || 'Unknown';
+            ts = c.timestamp || '';
+            txt = c.text || '';
+          }
+          var isLast = (idx === comments.length - 1);
+          return '<div class="flex gap-0 relative">' +
+            '<div class="flex flex-col items-center w-8 shrink-0">' +
+              '<div class="w-3 h-3 rounded-full bg-amber-500 border-2 border-amber-500/30 shadow-sm shadow-amber-500/40 z-10 mt-3.5 shrink-0"></div>' +
+              (!isLast ? '<div class="w-px flex-1 bg-gradient-to-b from-amber-500/40 to-base-800/20 mt-0.5"></div>' : '<div class="flex-1"></div>') +
+            '</div>' +
+            '<div class="flex-1 pb-4 pt-2.5 pl-1 min-w-0">' +
+              '<div class="flex items-center gap-2 mb-1">' +
+                '<div class="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400 text-[9px] font-bold shrink-0">' +
+                  author.charAt(0).toUpperCase() +
+                '</div>' +
+                '<span class="text-[11px] font-bold text-base-100">' + author + '</span>' +
+                (ts ? '<span class="text-[10px] text-base-600 ml-auto shrink-0"><i class="fas fa-clock text-[8px] mr-0.5"></i>' + ts + '</span>' : '') +
+              '</div>' +
+              '<div class="ml-7 px-3 py-2 rounded-lg bg-base-900 border border-base-800/80 text-[11px] text-base-300 leading-relaxed">' +
+                txt +
+              '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+
+        commentDetailRow = '<tr id="' + commentRowId + '" style="display:none;">' +
+          '<td colspan="7" class="px-6 pb-2 pt-0">' +
+            '<div class="mx-2 mt-0 mb-3 rounded-xl bg-base-950 border border-base-800/60 px-4 pt-3 pb-1">' +
+              '<div class="flex items-center gap-2 mb-3">' +
+                '<i class="fas fa-comments text-amber-500 text-[10px]"></i>' +
+                '<p class="text-[10px] font-bold text-base-400 uppercase tracking-wider">Activity Timeline — ' + commentCount + ' comment' + (commentCount > 1 ? 's' : '') + '</p>' +
+              '</div>' +
+              commentItems +
+            '</div>' +
+          '</td>' +
+        '</tr>';
+      } else {
+        commentToggleBtn = '<span class="text-[10px] text-base-700">—</span>';
+      }
+
+      return '<tr onclick="openDetail(' + t.id + ')" class="hover:bg-base-850/30 transition-colors border-b border-base-800/40 cursor-pointer">' +
+               '<td class="py-3 px-4 text-xs font-semibold text-base-100 truncate max-w-[200px]" title="' + t.title + '">' + t.title + '</td>' +
+               '<td class="py-3 px-4 text-xs text-base-400 truncate max-w-[140px]" title="' + t.project + '">' + t.project + '</td>' +
+               '<td class="py-3 px-4 text-center"><span class="px-2 py-0.5 text-[9px] rounded-full ' + getStatusClass(t.status) + '">' + t.status + '</span></td>' +
+               '<td class="py-3 px-4 text-center">' + priorityHtml + '</td>' +
+               '<td class="py-3 px-4">' +
+                 '<div class="flex items-center gap-2">' +
+                   '<div class="flex-1 bg-base-800 h-1.5 rounded-full overflow-hidden min-w-[50px]">' +
+                     '<div class="h-full rounded-full" style="width:' + t.progress + '%; background-color:' + pBarColor + '"></div>' +
+                   '</div>' +
+                   '<span class="text-[10px] text-base-400 font-semibold">' + t.progress + '%</span>' +
+                 '</div>' +
+               '</td>' +
+               '<td class="py-3 px-4 text-xs text-center ' + (daysUntil(t.deadline) < 0 ? 'text-red-400 font-medium' : 'text-base-400') + '">' + formatDate(t.deadline) + '</td>' +
+               '<td class="py-3 px-4 text-center">' + commentToggleBtn + '</td>' +
+             '</tr>' +
+             commentDetailRow;
+    }).join('');
+
+    // Inject toggleReportComments helper if not already defined
+    if (!window._rptCmtHelperInjected) {
+      window._rptCmtHelperInjected = true;
+    }
+
+    tableHtml = 
+      '<div class="bg-base-900 border border-base-800 rounded-2xl overflow-hidden shadow-xl max-w-full">' +
+        '<div class="overflow-x-auto overflow-y-auto max-h-[400px] relative">' +
+          '<table class="w-full text-left border-collapse min-w-[600px]">' +
+            '<thead class="sticky-thead">' +
+              '<tr class="border-b border-base-800 bg-base-900/60 text-[10px] text-base-400 font-700 propercase tracking-wider select-none">' +
+                '<th class="py-2.5 px-4">Task Title</th>' +
+                '<th class="py-2.5 px-4">Project</th>' +
+                '<th class="py-2.5 px-4 text-center">Status</th>' +
+                '<th class="py-2.5 px-4 text-center">Priority</th>' +
+                '<th class="py-2.5 px-4">Progress</th>' +
+                '<th class="py-2.5 px-4 text-center">Deadline</th>' +
+                '<th class="py-2.5 px-4 text-center">Comments</th>' +
+              '</tr>' +
+            '</thead>' +
+            '<tbody class="divide-y divide-base-800/40 bg-base-900/20">' +
+              rowsHtml +
+            '</tbody>' +
+          '</table>' +
+        '</div>' +
+      '</div>';
+  }
+
+  displayArea.innerHTML = 
+    profileCard +
+    metricsGrid +
+    taskListControls +
+    tableHtml;
+}
+
+function renderReportStatusFilterBtn(status, label, count, username) {
+  var isActive = reportCurrentStatusFilter === status;
+  var baseClass = 'px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ';
+  var activeClass = isActive 
+    ? 'bg-amber-500 text-base-950 font-bold shadow-md shadow-amber-500/10 border border-amber-500' 
+    : 'bg-base-950 hover:bg-base-800 text-base-400 border border-base-800';
+  
+  return '<button onclick="handleReportStatusFilter(\'' + status + '\', \'' + username + '\')" class="' + baseClass + activeClass + '">' +
+           label + ' <span class="px-1.5 py-0.5 rounded-full text-[10px] ' + (isActive ? 'bg-base-950/20 text-base-950' : 'bg-base-800 text-base-500') + '">' + count + '</span>' +
+         '</button>';
+}
+
+function handleReportStatusFilter(status, username) {
+  reportCurrentStatusFilter = status;
+  updateReportDisplay(username);
+}
+
+function handleReportTaskSearch(query, username) {
+  reportCurrentSearchQuery = query;
+  updateReportDisplay(username);
+}
+
+// Special custom card render helpers for reports
+function statCardSmall(icon, label, val) {
+  return '<div class="p-2 sm:p-4 rounded-xl sm:rounded-2xl bg-base-900 border border-base-800 flex items-center gap-2 sm:gap-3.5 relative overflow-hidden">' +
+           '<div class="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-500 text-[10px] sm:text-sm shrink-0"><i class="fas ' + icon + '"></i></div>' +
+           '<div class="min-w-0">' +
+             '<h4 class="text-sm sm:text-xl font-bold font-display text-base-100 leading-tight">' + val + '</h4>' +
+             '<p class="text-[9px] sm:text-[10px] text-base-500 font-semibold propercase tracking-wider mt-0 sm:mt-0.5">' + label + '</p>' +
+           '</div>' +
+         '</div>';
+}
+
+function statCardWithRate(icon, title, val, rateLabel) {
+  return '<div class="p-2 sm:p-4 rounded-xl sm:rounded-2xl bg-base-900 border border-base-800 flex items-center gap-2 sm:gap-3.5 relative overflow-hidden">' +
+           '<div class="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-500 text-[10px] sm:text-sm shrink-0"><i class="fas ' + icon + '"></i></div>' +
+           '<div class="min-w-0">' +
+             '<h4 class="text-sm sm:text-xl font-bold font-display text-base-100 leading-tight">' + val + '</h4>' +
+             '<p class="text-[9px] sm:text-[10px] text-base-500 font-semibold propercase tracking-wider mt-0 sm:mt-0.5">' + title + '</p>' +
+             '<span class="absolute top-1 sm:top-2 right-1 sm:right-2 px-1 sm:px-1.5 py-0.5 text-[7px] sm:text-[8px] font-bold rounded bg-emerald-500/10 text-emerald-500 border border-emerald-500/10">' + rateLabel + '</span>' +
+           '</div>' +
+         '</div>';
+}
+
+function statCardOverdue(icon, title, val) {
+  var isOverdue = val > 0;
+  var bg = isOverdue ? 'bg-red-500/5' : 'bg-base-900';
+  var border = isOverdue ? 'border-red-500/20' : 'border-base-800';
+  var text = isOverdue ? 'text-red-400' : 'text-base-100';
+  var iconBg = isOverdue ? 'bg-red-500/10 text-red-500' : 'bg-base-800 text-base-500';
+  
+  return '<div class="p-2 sm:p-4 rounded-xl sm:rounded-2xl ' + bg + ' border ' + border + ' flex items-center gap-2 sm:gap-3.5 relative overflow-hidden">' +
+           '<div class="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl ' + iconBg + ' flex items-center justify-center text-[10px] sm:text-sm shrink-0"><i class="fas ' + icon + '"></i></div>' +
+           '<div class="min-w-0">' +
+             '<h4 class="text-sm sm:text-xl font-bold font-display ' + text + ' leading-tight">' + val + '</h4>' +
+             '<p class="text-[9px] sm:text-[10px] text-base-500 font-semibold propercase tracking-wider mt-0 sm:mt-0.5">' + title + '</p>' +
+           '</div>' +
+         '</div>';
+}
+
+function statCardProgress(icon, title, val) {
+  return '<div class="p-2 sm:p-4 rounded-xl sm:rounded-2xl bg-base-900 border border-base-800 flex items-center gap-2 sm:gap-3.5 relative overflow-hidden">' +
+           '<div class="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 text-[10px] sm:text-sm shrink-0"><i class="fas ' + icon + '"></i></div>' +
+           '<div class="min-w-0 flex-1">' +
+             '<h4 class="text-sm sm:text-lg font-bold font-display text-base-100 leading-tight">' + val + '%</h4>' +
+             '<p class="text-[9px] sm:text-[10px] text-base-500 font-semibold propercase tracking-wider mt-0 sm:mt-0.5">' + title + '</p>' +
+             '<div class="w-full bg-base-800 h-0.5 sm:h-1 rounded-full overflow-hidden mt-0.5 sm:mt-1.5">' +
+               '<div class="bg-blue-500 h-full rounded-full" style="width:' + val + '%"></div>' +
+             '</div>' +
+           '</div>' +
+         '</div>';
+}
+
+// Toggle expandable comments row in Reports table
+function toggleReportComments(rowId, btn, event) {
+  if (event) { event.stopPropagation(); }
+  var row = document.getElementById(rowId);
+  if (!row) return;
+  var isOpen = row.style.display !== 'none';
+  row.style.display = isOpen ? 'none' : 'table-row';
+  // Toggle icon between + and −
+  var icon = btn ? btn.querySelector('i') : null;
+  if (icon) {
+    icon.className = isOpen ? 'fas fa-plus text-[8px]' : 'fas fa-minus text-[8px]';
+  }
+  // Toggle button colour
+  if (btn) {
+    if (isOpen) {
+      btn.classList.remove('bg-amber-500/30', 'border-amber-500/40');
+      btn.classList.add('bg-amber-500/10', 'border-amber-500/20');
+    } else {
+      btn.classList.remove('bg-amber-500/10', 'border-amber-500/20');
+      btn.classList.add('bg-amber-500/30', 'border-amber-500/40');
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', updateSearchPlaceholder);
+
+</script>
