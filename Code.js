@@ -12,7 +12,7 @@ const SHEET_ID = '1sXbqbx2CmwvxXvdkdaB55HeOuhsSPy1RwwEXSKHI8Xc';
 function doGet() {
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
-    .setTitle('Aarcon — Construction ReortTask Manager')
+    .setTitle('Aarcon — Construction Task Manager')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }

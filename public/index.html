@@ -2,30 +2,180 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Aarcon — Construction Task Manager</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏗️</text></svg>">
+  <meta name="description" content="Aarcon enterprise construction task management and site tracking platform.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23f59e0b'/><path d='M8 22L16 6L24 22H8Z' fill='%23020617'/><circle cx='16' cy='18' r='2' fill='%23f59e0b'/></svg>">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
     html, body {
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background-color: #0b0f19;
+      background-color: #020617;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     }
-    iframe {
-      width: 100%;
+    #app-loader {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(circle at 50% 30%, #0f172a 0%, #020617 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.4s;
+    }
+    #app-loader.loaded {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .brand-glow {
+      position: absolute;
+      width: 320px;
+      height: 320px;
+      background: radial-gradient(circle, rgba(245, 158, 11, 0.15) 0%, transparent 70%);
+      filter: blur(40px);
+      pointer-events: none;
+    }
+    .loader-card {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      padding: 32px 48px;
+    }
+    .logo-container {
+      margin-bottom: 24px;
+      position: relative;
+    }
+    .pulse-ring {
+      position: absolute;
+      inset: -12px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(245, 158, 11, 0.3);
+      animation: pulseGlow 2.5s ease-out infinite;
+    }
+    @keyframes pulseGlow {
+      0% { transform: scale(0.9); opacity: 0.8; }
+      50% { transform: scale(1.15); opacity: 0.2; }
+      100% { transform: scale(1.35); opacity: 0; }
+    }
+    .loader-title {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: #f8fafc;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .loader-title span {
+      color: #f59e0b;
+    }
+    .loader-subtitle {
+      font-size: 13px;
+      color: #94a3b8;
+      letter-spacing: 0.05em;
+      margin-bottom: 28px;
+    }
+    .progress-bar-container {
+      width: 220px;
+      height: 3px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 99px;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-bar {
+      width: 60%;
       height: 100%;
-      border: none;
+      background: linear-gradient(90deg, #f59e0b, #fbbf24, #f59e0b);
+      border-radius: 99px;
+      position: absolute;
+      animation: progressMove 1.6s ease-in-out infinite;
+    }
+    @keyframes progressMove {
+      0% { left: -60%; }
+      50% { left: 40%; width: 50%; }
+      100% { left: 100%; }
+    }
+    .app-frame-wrapper {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      overflow: hidden;
+      background: #020617;
+    }
+    .app-frame {
+      position: absolute;
+      top: -38px;
+      left: 0;
+      width: 100%;
+      height: calc(100% + 38px);
+      border: 0;
       display: block;
+      background: #020617;
+    }
+    @media (max-width: 768px) {
+      .app-frame {
+        top: -46px;
+        height: calc(100% + 46px);
+      }
     }
   </style>
 </head>
 <body>
-  <iframe 
-    src="https://script.google.com/macros/s/AKfycbzkyc5hp37PBNoR9NL_blTL0XCIE3WnKB2h_J_epHtvMGurwOx_EtbfH2tM_e02bOm9/exec"
-    allow="fullscreen; camera; microphone; clipboard-read; clipboard-write;"
-    title="Aarcon Construction Task Manager">
-  </iframe>
+  <!-- High-end branded loading screen -->
+  <div id="app-loader">
+    <div class="brand-glow"></div>
+    <div class="loader-card">
+      <div class="logo-container">
+        <div class="pulse-ring"></div>
+        <svg width="48" height="48" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect width="32" height="32" rx="8" fill="#f59e0b"/>
+          <path d="M8 22L16 6L24 22H8Z" fill="#020617"/>
+          <circle cx="16" cy="18" r="2.2" fill="#f59e0b"/>
+        </svg>
+      </div>
+      <div class="loader-title">Aarcon <span>Task Manager</span></div>
+      <div class="loader-subtitle">Enterprise Construction Suite</div>
+      <div class="progress-bar-container">
+        <div class="progress-bar"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Full-Screen App Frame (Google banner masked seamlessly) -->
+  <div class="app-frame-wrapper">
+    <iframe 
+      id="main-app"
+      class="app-frame"
+      src="https://script.google.com/macros/s/AKfycbzkyc5hp37PBNoR9NL_blTL0XCIE3WnKB2h_J_epHtvMGurwOx_EtbfH2tM_e02bOm9/exec"
+      allow="fullscreen; camera; microphone; clipboard-read; clipboard-write;"
+      title="Aarcon — Construction Task Manager"
+      onload="hideLoader()">
+    </iframe>
+  </div>
+
+  <script>
+    function hideLoader() {
+      const loader = document.getElementById('app-loader');
+      if (loader) {
+        setTimeout(() => {
+          loader.classList.add('loaded');
+          setTimeout(() => loader.remove(), 400);
+        }, 500);
+      }
+    }
+    setTimeout(hideLoader, 4000);
+  </script>
 </body>
 </html>
